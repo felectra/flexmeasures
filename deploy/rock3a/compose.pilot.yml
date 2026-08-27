@@ -77,7 +77,7 @@ services:
       until flexmeasures db upgrade; do
         echo "waiting for the database to be ready..."; sleep 3;
       done
-      exec gunicorn --bind 0.0.0.0:5000 --worker-tmp-dir /dev/shm --workers 2 --threads 2 wsgi:application
+      exec gunicorn --bind 0.0.0.0:5000 --worker-tmp-dir /dev/shm --workers 2 --threads 4 wsgi:application
 
   worker:
     build:
@@ -101,6 +101,9 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
     - |
+      until python -c "import socket; [socket.create_connection((h, p), 3) for h, p in (('db', 5432), ('queue', 6379))]" 2>/dev/null; do
+        echo "waiting for the database and the queue to be reachable..."; sleep 3;
+      done
       exec flexmeasures jobs run-worker --name rock3a-worker --queue "forecasting|scheduling|ingestion"
 
 volumes:

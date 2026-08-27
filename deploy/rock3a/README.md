@@ -13,23 +13,45 @@ The stack is a single `podman-compose` project: `server` (gunicorn) + `worker`
 > image from source on the board (8 GB RAM handles it) — or, as a fallback, on an Apple
 > Silicon Mac (native arm64) and transfer it with `podman save` / `podman load`.
 
----
-
-## 0. Prerequisites (on the board, user `sd`)
-
-Podman 5.x is already installed. Add a compose front-end and confirm tooling:
+All `podman-compose` commands below are run **from this directory** (`deploy/rock3a/`) so
+that the relative build context (`../..` = repo root) and the `.env` file resolve
+correctly. Each session, set a short handle first:
 
 ```bash
-podman --version                      # expect 5.x
-sudo apt-get update && sudo apt-get install -y podman-compose
-podman-compose --version              # or: pipx install podman-compose
+cd ~/flexmeasures/deploy/rock3a
+FMC="podman-compose --env-file .env -f compose.pilot.yml"
 ```
 
-Allow the user's containers to keep running after logout and across reboots (needed for
-rootless autostart, see step 7):
+---
+
+## 0. Host prerequisites (on the board, user `sd`)
+
+**Rootless network backend.** Podman 5 needs a rootless network backend to give containers
+connectivity (both during `build` and at runtime). The recommended backend is **pasta**
+(package `passt`); without it, builds and runs fail with
+`could not find pasta ... executable file not found`. Install it:
 
 ```bash
-loginctl enable-linger sd
+sudo apt-get update && sudo apt-get install -y passt
+```
+
+> Fallback without `passt`: if only `slirp4netns` is available, point Podman at it in
+> `~/.config/containers/containers.conf`:
+> ```ini
+> [network]
+> default_rootless_network_cmd = "slirp4netns"
+> ```
+> pasta is preferred (faster, the current default); use this only if you cannot install
+> `passt`.
+
+**Compose front-end and lingering.** `podman-compose` reads the `docker-compose`-style
+file; lingering lets the rootless containers keep running after logout and start on boot
+(see step 7):
+
+```bash
+sudo apt-get install -y podman-compose
+sudo loginctl enable-linger sd
+podman --version && podman-compose --version
 ```
 
 ## 1. Get the code onto the board
@@ -44,27 +66,39 @@ git checkout pilot/rock3a-podman
 ## 2. Create the secrets file
 
 ```bash
-cd ~/flexmeasures
-cp deploy/rock3a/.env.example deploy/rock3a/.env
+cd ~/flexmeasures/deploy/rock3a
+cp .env.example .env
+chmod 600 .env
 ```
 
-Generate real values and put them into `deploy/rock3a/.env`:
+Fill in real, generated values (Python 3 is preinstalled on Armbian). This one-liner writes
+a complete `.env` with strong secrets without printing them:
 
 ```bash
-python3 -c "import secrets; print('SECRET_KEY:', secrets.token_urlsafe())"
-python3 -c "import secrets; print('TOTP hex:', secrets.token_hex(24))"
-python3 -c "import secrets; print('a password:', secrets.token_hex(16))"
+python3 - <<'PY'
+import secrets, pathlib
+env = pathlib.Path(".env")
+env.write_text("\n".join([
+    "POSTGRES_DB=fm_pilot",
+    "POSTGRES_USER=fm_pilot",
+    "POSTGRES_PASSWORD=" + secrets.token_hex(16),
+    "FLEXMEASURES_REDIS_PASSWORD=" + secrets.token_hex(16),
+    "SECRET_KEY=" + secrets.token_urlsafe(48),
+    'SECURITY_TOTP_SECRETS={"1":"' + secrets.token_hex(24) + '"}',
+]) + "\n")
+env.chmod(0o600)
+print("wrote", env.resolve())
+PY
 ```
 
-Edit `deploy/rock3a/.env`, replacing every `CHANGE_ME_*`. `SECURITY_TOTP_SECRETS` must stay
-valid JSON, e.g. `{"1":"<the-hex-you-generated>"}`. The `.env` file is git-ignored — never
-commit it.
+The `.env` file is git-ignored — never commit it, and do not run
+`podman-compose ... config` (it prints resolved secrets). If a secret is ever exposed,
+regenerate `.env` and recreate the containers.
 
 ## 3. Build the arm64 image
 
 ```bash
-cd ~/flexmeasures
-podman-compose -f deploy/rock3a/compose.pilot.yml build
+$FMC build
 ```
 
 The build downloads mostly prebuilt aarch64 wheels, so it should not compile much. On the
@@ -86,36 +120,30 @@ df -h /
 ## 4. Start the datastores, then the app
 
 ```bash
-cd ~/flexmeasures
-podman-compose -f deploy/rock3a/compose.pilot.yml up -d db queue mailhog
-# give Postgres a few seconds to initialise, then:
-podman-compose -f deploy/rock3a/compose.pilot.yml up -d server worker
+$FMC up -d db queue mailhog
+$FMC up -d server worker
 ```
 
 The `server` container runs `flexmeasures db upgrade` on start (retrying until Postgres is
-ready), then launches gunicorn.
+ready), then launches gunicorn. The `worker` waits until Postgres and Redis are reachable
+before starting.
 
 ## 5. One-time data initialisation
 
 Populate standard structure and create a **real** account and admin user (no toy account):
 
 ```bash
-FM="podman-compose -f deploy/rock3a/compose.pilot.yml exec server flexmeasures"
-
-$FM add initial-structure
-$FM add account --name "Felectra"           # note the printed account id (e.g. 1)
-$FM add user --username admin --email admin@felectra.local --account-id 1 --roles admin
-# ^ this prompts for the admin password
+$FMC exec server flexmeasures add initial-structure
+$FMC exec server flexmeasures add account --name "Felectra"        # note the printed id
+$FMC exec server flexmeasures add user --username admin --email admin@felectra.local --account-id 1 --roles admin
+# ^ prompts for the admin password
 ```
 
 ## 6. Verify
 
 ```bash
-# health endpoint (from the board or any host on the Tailscale network)
 curl -f http://localhost:5000/api/v3_0/health/ready && echo OK
-
-# queue worker is registered and queues exist
-podman-compose -f deploy/rock3a/compose.pilot.yml logs --tail=30 worker
+$FMC logs --tail=30 worker
 ```
 
 Then open the UI at `http://<board-tailscale-ip>:5000` and log in with the admin user.
@@ -125,49 +153,40 @@ Captured e-mail (e.g. password resets) is visible at `http://<board-tailscale-ip
 ## 7. Autostart across reboots (rootless systemd)
 
 `restart: unless-stopped` recovers crashes within a session, but rootless Podman has no
-daemon to bring containers back after a reboot. Generate user systemd units and enable
-them (linger was enabled in step 0):
+daemon to bring containers back after a reboot. Model the stack as **Quadlet** units (the
+current, declarative approach) under `~/.config/containers/systemd/`, or generate units
+from the running containers:
 
 ```bash
-cd ~/flexmeasures
 mkdir -p ~/.config/systemd/user
-# generate one unit per running container of this project:
+cd ~/.config/systemd/user
 podman generate systemd --new --files --name \
   $(podman ps --filter label=io.podman.compose.project=flexmeasures -q)
-mv container-*.service ~/.config/systemd/user/ 2>/dev/null || true
 systemctl --user daemon-reload
-# enable the units that were generated (adjust names to what was produced):
+# enable each generated unit, e.g.:
 systemctl --user enable --now container-flexmeasures_server_1.service
 ```
 
-> Alternatively, model the stack as **Quadlet** `.container` / `.network` / `.volume` units
-> under `~/.config/containers/systemd/` for a cleaner, declarative autostart. That is the
-> recommended long-term shape and a good follow-up once the pilot is stable.
+Lingering (enabled in step 0) is what lets these user units start at boot without an
+interactive login.
 
 ## 8. Operations
 
 ```bash
-# logs
-podman-compose -f deploy/rock3a/compose.pilot.yml logs -f server
-
-# stop / start the whole stack
-podman-compose -f deploy/rock3a/compose.pilot.yml down
-podman-compose -f deploy/rock3a/compose.pilot.yml up -d
-
-# back up the database volume
-podman volume export fm-db-data --output ~/fm-db-backup-$(date +%F).tar
-
-# keep the SD card healthy
-podman image prune -f && df -h /
+$FMC logs -f server                 # follow logs
+$FMC down                           # stop the stack
+$FMC up -d                          # start the stack
+podman volume export fm-db-data --output ~/fm-db-backup-$(date +%F).tar   # back up the DB
+podman image prune -f && df -h /    # keep the SD card healthy
 ```
 
 ## Tuning notes
 
-- **gunicorn** is set to `--workers 2 --threads 2`. Heavy computation runs in the `worker`
-  container (via Redis queues), not in the web process, so the web tier stays light.
-- **Disk is the tight resource** (15 GB SD). Watch `df -h /`; prune images and old build
-  cache after rebuilds; consider moving Podman storage or the DB volume to an NVMe/USB SSD
-  if the pilot grows.
+- **gunicorn** runs `--workers 2 --threads 4` (the upstream-vetted default). Heavy
+  computation runs in the `worker` container via Redis queues, not in the web process.
+- **Disk is the tight resource** (15 GB SD). Watch `df -h /`; prune images and build cache
+  after rebuilds; consider moving Podman storage or the DB volume to an NVMe/USB SSD if the
+  pilot grows.
 - **No SSL by design** (internal pilot). If this later needs to be reachable outside the
   trusted network, switch `FLEXMEASURES_ENV` to `production` and put a reverse proxy
   (Caddy/nginx) with TLS in front — see `documentation/host/deployment.rst`.
