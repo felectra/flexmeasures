@@ -38,9 +38,11 @@ services:
     volumes:
       - fm-redis-data:/data
 
-  mailhog:
-    # Test mail server: captured mail is read in the web UI, nothing leaves the board.
-    image: docker.io/mailhog/mailhog
+  mailpit:
+    # Test mail server — Mailpit, the arm64-native successor to MailHog (mailhog/mailhog is
+    # published for amd64 only). Captured mail is read in the web UI, nothing leaves the board.
+    # Mailpit defaults: SMTP on :1025, web UI on :8025.
+    image: docker.io/axllent/mailpit
     restart: unless-stopped
     ports:
       - "${BIND_ADDR}:8025:8025"   # web UI, bound to the given interface only (not 0.0.0.0)
@@ -52,7 +54,7 @@ services:
     depends_on:
       - db
       - queue
-      - mailhog
+      - mailpit
     ports:
       - "${BIND_ADDR}:5000:5000"   # bound to the given interface only (not 0.0.0.0)
     environment:
@@ -64,7 +66,7 @@ services:
       TRUSTED_HOSTS: ${TRUSTED_HOSTS}
       FLEXMEASURES_REDIS_URL: queue
       FLEXMEASURES_REDIS_PASSWORD: ${FLEXMEASURES_REDIS_PASSWORD}
-      MAIL_SERVER: mailhog
+      MAIL_SERVER: mailpit
       MAIL_PORT: 1025
       LOGGING_LEVEL: INFO
     healthcheck:
@@ -98,7 +100,7 @@ services:
       TRUSTED_HOSTS: ${TRUSTED_HOSTS}
       FLEXMEASURES_REDIS_URL: queue
       FLEXMEASURES_REDIS_PASSWORD: ${FLEXMEASURES_REDIS_PASSWORD}
-      MAIL_SERVER: mailhog
+      MAIL_SERVER: mailpit
       MAIL_PORT: 1025
       LOGGING_LEVEL: INFO
     entrypoint: ["/bin/sh", "-c"]

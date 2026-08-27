@@ -8,7 +8,7 @@ profiling stay off (unlike development mode).
 
 The stack is a single `podman-compose` project: `server` (gunicorn) + `worker`
 (forecasting/scheduling/ingestion queues) + `db` (Postgres 17) + `queue` (Redis) +
-`mailhog` (test mail).
+`mailpit` (test mail).
 
 > **Why we build the image ourselves:** the official `lfenergy/flexmeasures` image on Docker
 > Hub is published for `amd64` only — there is no arm64 build to pull. We build an arm64
@@ -29,12 +29,13 @@ FMC="podman-compose --env-file .env -f compose.pilot.yml"
 
 ## 0. Host prerequisites (on the board, user `sd`)
 
-**Rootless network backend.** Podman 5 needs a rootless network backend to give containers
-connectivity. The recommended backend is **pasta** (package `passt`); without it, runs fail
-with `could not find pasta ... executable file not found`:
+**Rootless networking.** Podman 5 needs `pasta` (package `passt`) for container connectivity
+and `aardvark-dns` for service-name DNS between containers. Without `pasta`, runs fail with
+`could not find pasta`; without `aardvark-dns`, containers cannot resolve each other by name
+(`db`, `queue`, `mailpit`), so the server cannot reach the database:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y passt
+sudo apt-get update && sudo apt-get install -y passt aardvark-dns
 ```
 
 > Fallback without `passt`: if only `slirp4netns` is available, point Podman at it in
@@ -92,7 +93,7 @@ print("wrote", env.resolve())
 PY
 ```
 
-`BIND_ADDR` publishes the UI/API and MailHog only on that interface (the board's Tailscale
+`BIND_ADDR` publishes the UI/API and Mailpit only on that interface (the board's Tailscale
 IP), not on `0.0.0.0`. `TRUSTED_HOSTS` must contain every address you reach the server by —
 in production, a Host header that is not listed is rejected. The `.env` file is git-ignored
 — never commit it, and do not run `podman-compose ... config` (it prints resolved secrets).
@@ -124,7 +125,7 @@ podman images | grep flexmeasures-pilot
 ## 4. Start the datastores, then the app
 
 ```bash
-$FMC up -d db queue mailhog
+$FMC up -d db queue mailpit
 $FMC up -d server worker
 ```
 
@@ -158,7 +159,7 @@ $FMC logs --tail=30 worker
 ```
 
 Then open the UI at `http://100.75.41.122:5000` and log in with the admin user. Captured
-e-mail (e.g. password resets) is visible at `http://100.75.41.122:8025` (MailHog).
+e-mail (e.g. password resets) is visible at `http://100.75.41.122:8025` (Mailpit).
 
 ## 7. Autostart across reboots (rootless systemd)
 
