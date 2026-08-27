@@ -180,12 +180,12 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-Type=simple
+Type=oneshot
+RemainAfterExit=yes
 WorkingDirectory=%h/flexmeasures/deploy/rock3a
-ExecStart=/usr/bin/podman-compose --env-file .env -f compose.pilot.yml up
+ExecStart=/usr/bin/podman-compose --env-file .env -f compose.pilot.yml up -d
 ExecStop=/usr/bin/podman-compose --env-file .env -f compose.pilot.yml down
-Restart=on-failure
-TimeoutStopSec=90
+TimeoutStartSec=300
 
 [Install]
 WantedBy=default.target
@@ -235,7 +235,10 @@ podman image prune -f && df -h /    # keep the eMMC healthy
   `documentation/host/deployment.rst`.
 - **Dashboard map** needs a Mapbox token: set `MAPBOX_ACCESS_TOKEN` in `.env` to a free
   public `pk.*` token from mapbox.com, then restart the server. Without it, the map area on
-  the dashboard and asset pages stays blank (no error).
+  the dashboard and asset pages stays blank (no error). The map centers on the bounding box
+  of your assets' locations; before any located assets exist it uses
+  `FLEXMEASURES_DEFAULT_BOUNDING_BOX` — a config-file-only setting (not an env var), e.g.
+  `FLEXMEASURES_DEFAULT_BOUNDING_BOX = ((48.2, 30.2), (46.4, 33.2))` for the Mykolaiv region.
 - **Two-factor auth** is off (`SECURITY_TWO_FACTOR` unset). For a longer-lived deployment,
   consider enabling it — see `documentation/host/installation.rst`.
 - **Disk** (15 GB eMMC): watch `df -h /`; prune images after image updates; consider an
