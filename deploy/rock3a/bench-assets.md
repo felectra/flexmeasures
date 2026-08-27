@@ -11,7 +11,7 @@ the asset model.
 
 ```
 Office (Mykolaiv lab)          site, grid connection point
-└── Bank                       the battery as the inverter sees it
+└── BatteryBank                       the battery as the inverter sees it
     ├── String A               14S3P, own JK BMS
     └── String B               14S3P, own JK BMS
 Generator                      7 kW via ATS
@@ -22,7 +22,7 @@ Why this shape rather than one flat battery asset:
 **Office** is where grid exchange is measured, and it is the only point where the inverter's
 numbers describe the whole site.
 
-**Bank** is what the inverter reports. It cannot see the two strings separately — it measures
+**BatteryBank** is what the inverter reports. It cannot see the two strings separately — it measures
 one pair of terminals and nothing else.
 
 **String A / String B** exist as separate assets because they are separate batteries in every
@@ -31,7 +31,7 @@ one than the other), and coulomb counters that disagree with each other by twent
 percentage points at identical terminal voltage. Modelling them as one asset would bake in an
 assumption the hardware contradicts.
 
-**Generator** is a sibling of Office, not a child of Bank.
+**Generator** is a sibling of Office, not a child of BatteryBank.
 
 ## What actually has data today
 
@@ -40,7 +40,7 @@ This is the part worth reading twice.
 | Asset | Source | State |
 |---|---|---|
 | Office | `deye/ac/*` over MQTT | **live** |
-| Bank | `deye/battery/*` over MQTT | **live**, with caveats below |
+| BatteryBank | `deye/battery/*` over MQTT | **live**, with caveats below |
 | String A / B | none yet | **placeholder** |
 | Generator | none at all | **placeholder** |
 
