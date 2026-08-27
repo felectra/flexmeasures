@@ -57,6 +57,10 @@ services:
       - mailpit
     ports:
       - "${BIND_ADDR}:5000:5000"   # bound to the given interface only (not 0.0.0.0)
+    volumes:
+      # flexmeasures.cfg holds settings that have no environment variable (e.g. the default map bounding box).
+      # Mounted at the container's instance folder; the host dir is app-config/ (instance/ is git-ignored).
+      - ./app-config:/app/instance:ro
     environment:
       SQLALCHEMY_DATABASE_URI: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}"
       SECRET_KEY: ${SECRET_KEY}
