@@ -8,10 +8,11 @@ The stack is a single `podman-compose` project: `server` (gunicorn) + `worker`
 (forecasting/scheduling/ingestion queues) + `db` (Postgres 17) + `queue` (Redis) +
 `mailhog` (test mail).
 
-> **Why we build the image locally:** the official `lfenergy/flexmeasures` image on Docker
-> Hub is published for `amd64` only. There is no arm64 build to pull, so we build the
-> image from source on the board (8 GB RAM handles it) — or, as a fallback, on an Apple
-> Silicon Mac (native arm64) and transfer it with `podman save` / `podman load`.
+> **Why we build the image ourselves:** the official `lfenergy/flexmeasures` image on Docker
+> Hub is published for `amd64` only — there is no arm64 build to pull. We build an arm64
+> image on a separate arm64 host (an Apple Silicon Mac is ideal) and copy the finished image
+> to the board with `podman save` / `podman load`, because the board's 14.5 GB eMMC is too
+> small to run this build in place.
 
 All `podman-compose` commands below are run **from this directory** (`deploy/rock3a/`) so
 that the relative build context (`../..` = repo root) and the `.env` file resolve
@@ -95,27 +96,28 @@ The `.env` file is git-ignored — never commit it, and do not run
 `podman-compose ... config` (it prints resolved secrets). If a secret is ever exposed,
 regenerate `.env` and recreate the containers.
 
-## 3. Build the arm64 image
+## 3. Build the arm64 image on a separate arm64 host
+
+The board's 14.5 GB eMMC is too small to build this image in place — the build peaks well
+above the free space. Build it on any arm64 machine with room (an Apple Silicon Mac is
+ideal — native arm64) and copy the finished image (~1–1.5 GB) to the board.
+
+On the build host, with this branch checked out at the repo root:
 
 ```bash
-$FMC build
+podman build --platform linux/arm64 -t localhost/flexmeasures-pilot:local .
+podman save localhost/flexmeasures-pilot:local | ssh sd@100.75.41.122 'podman load'
 ```
 
-The build downloads mostly prebuilt aarch64 wheels, so it should not compile much. On the
-15 GB SD card, reclaim build cache afterwards:
+`podman load` on the board is rootless — no sudo. Confirm the image arrived:
 
 ```bash
-podman image prune -f
-df -h /
+podman images | grep flexmeasures-pilot
 ```
 
-> **Fallback (build on an Apple Silicon Mac):**
-> ```bash
-> # on the Mac, in a checkout of this branch
-> podman build --platform linux/arm64 -t localhost/flexmeasures-pilot:local .
-> podman save localhost/flexmeasures-pilot:local | ssh sd@100.75.41.122 'podman load'
-> ```
-> Then skip the `build` step on the board and go straight to `up`.
+> If the build host cannot reach the board directly, save to a file and copy it over
+> instead: `podman save -o fm-image.tar localhost/flexmeasures-pilot:local`, transfer
+> `fm-image.tar`, then `podman load -i fm-image.tar` on the board.
 
 ## 4. Start the datastores, then the app
 

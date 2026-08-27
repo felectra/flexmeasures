@@ -44,9 +44,8 @@ services:
       - "8025:8025"   # web UI; SMTP (1025) stays internal to the compose network
 
   server:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
+    # The image is built separately on an arm64 host and loaded on the board — see README.
+    # The board's 14.5 GB eMMC is too small to build this image in place.
     image: localhost/flexmeasures-pilot:local
     restart: unless-stopped
     depends_on:
@@ -80,9 +79,6 @@ services:
       exec gunicorn --bind 0.0.0.0:5000 --worker-tmp-dir /dev/shm --workers 2 --threads 4 wsgi:application
 
   worker:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
     image: localhost/flexmeasures-pilot:local
     restart: unless-stopped
     depends_on:
