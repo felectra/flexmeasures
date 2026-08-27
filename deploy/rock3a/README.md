@@ -233,6 +233,9 @@ podman image prune -f && df -h /    # keep the eMMC healthy
   network, enable real HTTPS — terminate TLS with `tailscale serve`, or put a reverse proxy
   (Caddy/nginx) in front — and drop the `FORCE_HTTPS=False` override. See
   `documentation/host/deployment.rst`.
+- **Dashboard map** needs a Mapbox token: set `MAPBOX_ACCESS_TOKEN` in `.env` to a free
+  public `pk.*` token from mapbox.com, then restart the server. Without it, the map area on
+  the dashboard and asset pages stays blank (no error).
 - **Two-factor auth** is off (`SECURITY_TWO_FACTOR` unset). For a longer-lived deployment,
   consider enabling it — see `documentation/host/installation.rst`.
 - **Disk** (15 GB eMMC): watch `df -h /`; prune images after image updates; consider an

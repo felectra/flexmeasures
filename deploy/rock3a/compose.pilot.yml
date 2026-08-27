@@ -70,6 +70,7 @@ services:
       MAIL_SERVER: mailpit
       MAIL_PORT: 1025
       LOGGING_LEVEL: INFO
+      MAPBOX_ACCESS_TOKEN: ${MAPBOX_ACCESS_TOKEN}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/api/v3_0/health/ready"]
       start_period: 30s
