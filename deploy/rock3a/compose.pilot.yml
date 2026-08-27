@@ -1,14 +1,16 @@
 # ------------------------------------------------------------------
 # FlexMeasures — pilot stack for a Radxa ROCK 3A (aarch64), rootless Podman.
-# Internal / development mode (no SSL). The arm64 image is built locally,
-# because the official lfenergy/flexmeasures image is published for amd64 only.
+# Production configuration with forced HTTPS turned off
+# (FLEXMEASURES_FORCE_HTTPS=False) for an internal-only pilot reached over
+# Tailscale. Debugging and request profiling are off (unlike development mode).
+# The arm64 image is built on a separate arm64 host and loaded on the board —
+# see README (the board's 14.5 GB eMMC is too small to build it in place).
 #
-# Usage (on the board, from the repository root):
-#   podman-compose -f deploy/rock3a/compose.pilot.yml build
-#   podman-compose -f deploy/rock3a/compose.pilot.yml up -d
+# Usage (on the board, from THIS directory, deploy/rock3a/):
+#   podman-compose --env-file .env -f compose.pilot.yml up -d
 #
-# Secrets and passwords come from deploy/rock3a/.env — copy it from
-# .env.example and fill in real, generated values before the first run.
+# Secrets, TRUSTED_HOSTS and the bind address all come from ./.env
+# (copy it from .env.example and fill in real, generated values).
 # ------------------------------------------------------------------
 
 services:
@@ -37,15 +39,14 @@ services:
       - fm-redis-data:/data
 
   mailhog:
-    # Test mail server: nothing leaves the board, captured mail is read in the web UI.
+    # Test mail server: captured mail is read in the web UI, nothing leaves the board.
     image: docker.io/mailhog/mailhog
     restart: unless-stopped
     ports:
-      - "8025:8025"   # web UI; SMTP (1025) stays internal to the compose network
+      - "${BIND_ADDR}:8025:8025"   # web UI, bound to the given interface only (not 0.0.0.0)
 
   server:
-    # The image is built separately on an arm64 host and loaded on the board — see README.
-    # The board's 14.5 GB eMMC is too small to build this image in place.
+    # Built off-board and loaded via podman save|load — see README.
     image: localhost/flexmeasures-pilot:local
     restart: unless-stopped
     depends_on:
@@ -53,12 +54,14 @@ services:
       - queue
       - mailhog
     ports:
-      - "5000:5000"
+      - "${BIND_ADDR}:5000:5000"   # bound to the given interface only (not 0.0.0.0)
     environment:
       SQLALCHEMY_DATABASE_URI: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}"
       SECRET_KEY: ${SECRET_KEY}
       SECURITY_TOTP_SECRETS: ${SECURITY_TOTP_SECRETS}
-      FLEXMEASURES_ENV: development
+      FLEXMEASURES_ENV: production
+      FLEXMEASURES_FORCE_HTTPS: "False"
+      TRUSTED_HOSTS: ${TRUSTED_HOSTS}
       FLEXMEASURES_REDIS_URL: queue
       FLEXMEASURES_REDIS_PASSWORD: ${FLEXMEASURES_REDIS_PASSWORD}
       MAIL_SERVER: mailhog
@@ -73,9 +76,11 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
     - |
-      until flexmeasures db upgrade; do
-        echo "waiting for the database to be ready..."; sleep 3;
+      set -e
+      until python -c "import socket; socket.create_connection(('db', 5432), 3)" 2>/dev/null; do
+        echo "waiting for the database to accept connections..."; sleep 3;
       done
+      flexmeasures db upgrade
       exec gunicorn --bind 0.0.0.0:5000 --worker-tmp-dir /dev/shm --workers 2 --threads 4 wsgi:application
 
   worker:
@@ -88,7 +93,9 @@ services:
       SQLALCHEMY_DATABASE_URI: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}"
       SECRET_KEY: ${SECRET_KEY}
       SECURITY_TOTP_SECRETS: ${SECURITY_TOTP_SECRETS}
-      FLEXMEASURES_ENV: development
+      FLEXMEASURES_ENV: production
+      FLEXMEASURES_FORCE_HTTPS: "False"
+      TRUSTED_HOSTS: ${TRUSTED_HOSTS}
       FLEXMEASURES_REDIS_URL: queue
       FLEXMEASURES_REDIS_PASSWORD: ${FLEXMEASURES_REDIS_PASSWORD}
       MAIL_SERVER: mailhog
@@ -97,11 +104,16 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
     - |
+      set -e
       until python -c "import socket; [socket.create_connection((h, p), 3) for h, p in (('db', 5432), ('queue', 6379))]" 2>/dev/null; do
         echo "waiting for the database and the queue to be reachable..."; sleep 3;
       done
       exec flexmeasures jobs run-worker --name rock3a-worker --queue "forecasting|scheduling|ingestion"
 
 volumes:
+  # Explicit names so the volumes are not prefixed with the compose project name
+  # (keeps backup/restore commands stable regardless of the working directory).
   fm-db-data:
+    name: fm-db-data
   fm-redis-data:
+    name: fm-redis-data
