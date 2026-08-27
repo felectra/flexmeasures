@@ -1,0 +1,108 @@
+# ------------------------------------------------------------------
+# FlexMeasures — pilot stack for a Radxa ROCK 3A (aarch64), rootless Podman.
+# Internal / development mode (no SSL). The arm64 image is built locally,
+# because the official lfenergy/flexmeasures image is published for amd64 only.
+#
+# Usage (on the board, from the repository root):
+#   podman-compose -f deploy/rock3a/compose.pilot.yml build
+#   podman-compose -f deploy/rock3a/compose.pilot.yml up -d
+#
+# Secrets and passwords come from deploy/rock3a/.env — copy it from
+# .env.example and fill in real, generated values before the first run.
+# ------------------------------------------------------------------
+
+services:
+  db:
+    image: docker.io/library/postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - fm-db-data:/var/lib/postgresql/data
+      - ../../ci/load-psql-extensions.sql:/docker-entrypoint-initdb.d/load-psql-extensions.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  queue:
+    image: docker.io/library/redis:7
+    restart: unless-stopped
+    command: redis-server --loglevel warning --requirepass ${FLEXMEASURES_REDIS_PASSWORD}
+    volumes:
+      - fm-redis-data:/data
+
+  mailhog:
+    # Test mail server: nothing leaves the board, captured mail is read in the web UI.
+    image: docker.io/mailhog/mailhog
+    restart: unless-stopped
+    ports:
+      - "8025:8025"   # web UI; SMTP (1025) stays internal to the compose network
+
+  server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: localhost/flexmeasures-pilot:local
+    restart: unless-stopped
+    depends_on:
+      - db
+      - queue
+      - mailhog
+    ports:
+      - "5000:5000"
+    environment:
+      SQLALCHEMY_DATABASE_URI: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}"
+      SECRET_KEY: ${SECRET_KEY}
+      SECURITY_TOTP_SECRETS: ${SECURITY_TOTP_SECRETS}
+      FLEXMEASURES_ENV: development
+      FLEXMEASURES_REDIS_URL: queue
+      FLEXMEASURES_REDIS_PASSWORD: ${FLEXMEASURES_REDIS_PASSWORD}
+      MAIL_SERVER: mailhog
+      MAIL_PORT: 1025
+      LOGGING_LEVEL: INFO
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/v3_0/health/ready"]
+      start_period: 30s
+      interval: 30s
+      timeout: 10s
+      retries: 6
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+    - |
+      until flexmeasures db upgrade; do
+        echo "waiting for the database to be ready..."; sleep 3;
+      done
+      exec gunicorn --bind 0.0.0.0:5000 --worker-tmp-dir /dev/shm --workers 2 --threads 2 wsgi:application
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: localhost/flexmeasures-pilot:local
+    restart: unless-stopped
+    depends_on:
+      - db
+      - queue
+    environment:
+      SQLALCHEMY_DATABASE_URI: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}"
+      SECRET_KEY: ${SECRET_KEY}
+      SECURITY_TOTP_SECRETS: ${SECURITY_TOTP_SECRETS}
+      FLEXMEASURES_ENV: development
+      FLEXMEASURES_REDIS_URL: queue
+      FLEXMEASURES_REDIS_PASSWORD: ${FLEXMEASURES_REDIS_PASSWORD}
+      MAIL_SERVER: mailhog
+      MAIL_PORT: 1025
+      LOGGING_LEVEL: INFO
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+    - |
+      exec flexmeasures jobs run-worker --name rock3a-worker --queue "forecasting|scheduling|ingestion"
+
+volumes:
+  fm-db-data:
+  fm-redis-data:
