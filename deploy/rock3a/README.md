@@ -161,6 +161,14 @@ $FMC logs --tail=30 worker
 Then open the UI at `http://100.75.41.122:5000` and log in with the admin user. Captured
 e-mail (e.g. password resets) is visible at `http://100.75.41.122:8025` (Mailpit).
 
+## 6a. Model the bench
+
+With structure and account in place, create the assets for the installation this board sits
+in: **[bench-assets.md](bench-assets.md)**. It covers the asset tree, how to reach the MQTT
+broker that carries the inverter data, and -- the part that saves time -- which assets have a
+data source today and which are placeholders standing in for hardware that is not connected
+yet.
+
 ## 7. Autostart across reboots (rootless systemd)
 
 `restart: unless-stopped` recovers crashes within a session, but rootless Podman has no
