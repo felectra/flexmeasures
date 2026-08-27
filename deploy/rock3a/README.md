@@ -217,6 +217,15 @@ podman image prune -f && df -h /    # keep the eMMC healthy
 
 ## Tuning notes
 
+- **Pinned image versions** for reproducibility: `postgres:17.11`, `redis:7.4.11`,
+  `axllent/mailpit:v1.31.0`, and the FlexMeasures image built from a known branch/tag — no
+  floating `latest`/major tags, so a redeploy cannot silently pull a changed base image. To
+  move FlexMeasures forward (e.g. to v1.1.0, which slims the image by dropping dev-only
+  dependencies), rebuild from that git tag on the arm64 host, tag it (e.g.
+  `flexmeasures-pilot:1.1.0`), `podman load` it, point the compose `image:` at that tag, and
+  `up -d`. Bump the datastore pins deliberately, then test, rather than tracking a moving tag.
+  For smaller images on the eMMC, the `-alpine` variants (`postgres:17.11-alpine`,
+  `redis:7.4.11-alpine`) are available.
 - **gunicorn** runs `--workers 2 --threads 4` (the upstream-vetted default). Heavy
   computation runs in the `worker` container via Redis queues, not in the web process.
 - **No TLS by design** (internal pilot over Tailscale): production mode with

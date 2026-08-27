@@ -15,7 +15,7 @@
 
 services:
   db:
-    image: docker.io/library/postgres:17
+    image: docker.io/library/postgres:17.11
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
@@ -32,7 +32,7 @@ services:
       retries: 5
 
   queue:
-    image: docker.io/library/redis:7
+    image: docker.io/library/redis:7.4.11
     restart: unless-stopped
     command: redis-server --loglevel warning --requirepass ${FLEXMEASURES_REDIS_PASSWORD}
     volumes:
@@ -42,7 +42,7 @@ services:
     # Test mail server — Mailpit, the arm64-native successor to MailHog (mailhog/mailhog is
     # published for amd64 only). Captured mail is read in the web UI, nothing leaves the board.
     # Mailpit defaults: SMTP on :1025, web UI on :8025.
-    image: docker.io/axllent/mailpit
+    image: docker.io/axllent/mailpit:v1.31.0
     restart: unless-stopped
     ports:
       - "${BIND_ADDR}:8025:8025"   # web UI, bound to the given interface only (not 0.0.0.0)
