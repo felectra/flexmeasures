@@ -33,6 +33,10 @@ with app.app_context():
     ACCOUNT_NAME = "Felectra"
     account = db.session.query(Account).filter_by(name=ACCOUNT_NAME).one()
 
+    # Everything sits at the one physical site (the Mykolaiv office), so every asset carries
+    # the same coordinates — that is what places them on the dashboard map.
+    LATITUDE, LONGITUDE = 46.975, 31.995
+
     def asset_type(name):
         return db.session.query(GenericAssetType).filter_by(name=name).one()
 
@@ -60,36 +64,44 @@ with app.app_context():
         db.session.flush()
         return asset, True
 
-    # Office is the only root that carries a location, so the dashboard map centres on Mykolaiv.
+    # Every asset is at the office; Office also anchors the dashboard map on Mykolaiv.
     office, c_office = get_or_create(
         "Office",
         "building",
-        latitude=46.975,
-        longitude=31.995,
+        latitude=LATITUDE,
+        longitude=LONGITUDE,
         description="Mykolaiv lab — site and grid connection point (grid exchange from deye/ac/*).",
     )
     bank, c_bank = get_or_create(
         "BatteryBank",
         "battery",
         parent=office,
+        latitude=LATITUDE,
+        longitude=LONGITUDE,
         description="The battery as the inverter reports it (deye/battery/*); it cannot see the two strings.",
     )
     string_a, c_a = get_or_create(
         "String A",
         "battery",
         parent=bank,
+        latitude=LATITUDE,
+        longitude=LONGITUDE,
         description="14S3P, own JK-BMS. PLACEHOLDER — per-string BLE telemetry not deployed yet (see bench-assets.md).",
     )
     string_b, c_b = get_or_create(
         "String B",
         "battery",
         parent=bank,
+        latitude=LATITUDE,
+        longitude=LONGITUDE,
         description="14S3P, own JK-BMS. PLACEHOLDER — per-string BLE telemetry not deployed yet (see bench-assets.md).",
     )
     # Generator is a sibling of Office (a root asset), not a child: it feeds the site via an ATS.
     generator, c_gen = get_or_create(
         "Generator",
         "process",
+        latitude=LATITUDE,
+        longitude=LONGITUDE,
         description="7 kW via ATS. PLACEHOLDER — no running signal anywhere, so nothing can be scheduled around it.",
     )
 
