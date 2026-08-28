@@ -126,3 +126,16 @@ Before considering a task done:
 - [ ] Changelog entry added (if user-facing)
 - [ ] Commits are atomic; no temporary files committed
 - [ ] If the task touched the agent system itself, `coordinator` was consulted
+
+## Agent Mail Identity
+
+<!-- agent-mail: name=BluePine project=/data/projects/felectra-deployment -->
+
+FlexMeasures joins the repo-family coordination bus `project_key=/data/projects/felectra-deployment`
+(shared with the `felectra-*` repos). Register with the name above and that `project_key`,
+overriding the cwd default.
+
+For the office-energy data boundary, also register on the hardware repos' own buses —
+`/data/projects/deye-imex` (inverter Modbus → `deye/*` MQTT → FlexMeasures ingestion) and
+`/data/projects/esphome-jk-bms` (per-string JK-BMS telemetry → FlexMeasures sensors) — because
+those repos declare no shared bus, so their agents land on their own cwd buses.
