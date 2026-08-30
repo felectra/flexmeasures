@@ -129,13 +129,35 @@ Before considering a task done:
 
 ## Agent Mail Identity
 
-<!-- agent-mail: name=BluePine project=/data/projects/felectra-deployment -->
+<!-- agent-mail: name=BluePine project=/data/projects/flexmeasures -->
 
-FlexMeasures joins the repo-family coordination bus `project_key=/data/projects/felectra-deployment`
-(shared with the `felectra-*` repos). Register with the name above and that `project_key`,
-overriding the cwd default.
+This autonomous repository participates in the laboratory EMS/BMS program governed from
+`/data/projects/deye-imex`; governance does not transfer ownership of FlexMeasures source. The
+stable identity and primary bus are the exact marker above. The shared Product Bus is
+`lab-ems-energy-stack`, and the canonical program snapshot is
+`/data/projects/deye-imex/docs/where-we-are.md`.
 
-For the office-energy data boundary, also register on the hardware repos' own buses —
-`/data/projects/deye-imex` (inverter Modbus → `deye/*` MQTT → FlexMeasures ingestion) and
-`/data/projects/esphome-jk-bms` (per-string JK-BMS telemetry → FlexMeasures sensors) — because
-those repos declare no shared bus, so their agents land on their own cwd buses.
+This marker supersedes the previous repository marker that pointed at
+`/data/projects/felectra-deployment`. The existing `BluePine` registration and messages there
+are retained as historical pre-Product state, but that Project is not linked to
+`lab-ems-energy-stack` and must not carry new laboratory-program traffic. Do not delete or
+rewrite that history without a separate owner decision.
+
+All three linked project buses contain recipient aliases `LavenderPuma`, `YellowHeron`, and
+`BluePine`. Send from this bus only as `BluePine`, with explicit recipients. Product Bus in
+`am 0.3.30` is a federated read surface: create each update once on its owning repository bus;
+use the same `thread_id` for cross-repo replies. Never use `broadcast`, and do not pass `topic`.
+Shared threads use `lab-ems-energy-stack.shared.<kind>[.<subject>]`; repository-only threads use
+`lab-ems-energy-stack.repo.flexmeasures.<topic>`.
+
+Program work status and dependencies live only in `/data/projects/deye-imex/.beads/` (prefix
+`labems`). Do not run `br init` or `ee init` here. Update the governing status file only when
+the program snapshot changes, and record the updater plus this repository's exact SHA.
+
+Do not run bare program-level `ee` commands from this repo: `/data/projects/.ee` is an
+unscoped ancestor marker, not the program workspace. Use
+`ee --workspace /data/projects/deye-imex ...`.
+
+Agent Mail coordination never authorizes access to a live pilot, seeding/migration, deployment,
+an EMS command, or a physical laboratory scenario. Those require explicit user authorization
+for the exact action and the safety gates in `/data/projects/deye-imex/docs/scenarios.md`.
