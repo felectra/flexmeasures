@@ -1,0 +1,33 @@
+{
+  "version": "sc9-shadow-peakshave-v1",
+  "objective": "shadow peak-shaving of grid import (deye/ac/total_grid_power, Office)",
+  "resolution": "PT15M",
+  "horizon_hours": 24,
+  "solver": "highspy",
+  "target_output_sensor_id": null,
+  "scheduling_sensor_id_for_validation": 17,
+  "battery": {
+    "capacity_kwh": 18.0,
+    "capacity_sensitivity_kwh": 19.7,
+    "soc_at_start_pct": 50,
+    "soc_min_pct": 10,
+    "soc_max_pct": 100,
+    "power_capacity_kw": 5.0
+  },
+  "flex_context": {
+    "inflexible-consumption": [{"sensor": 7}],
+    "site-peak-consumption": "0.3 kW",
+    "site-peak-consumption-price": "120 EUR/MW",
+    "consumption-price": "50 EUR/MWh",
+    "production-price": "50 EUR/MWh"
+  },
+  "assumptions": {
+    "capacity": "18 kWh is nameplate/calc, NOT measured; 19.7 kWh kept as a sensitivity value; SOH unknown.",
+    "soc_at_start": "Fixed 50% is an explicit assumption; there is no trustworthy live SOC (deye/battery/soc is forbidden, and the two strings diverge 53/24%).",
+    "soc_band": "10-100% SOC band is a modelling choice; the hard voltage window 44-57 V is never widened.",
+    "prices": "Flat 50 EUR/MWh consumption=production is an internal nudge, not a tariff; the round-trip loss keeps the battery idle unless the peak price forces action.",
+    "peak": "site-peak-consumption 0.3 kW baseline and 120 EUR/MW price are an internal peak-shaving nudge, not a measured or contracted limit.",
+    "grid_signal": "deye/ac/total_grid_power already nets the battery (behind-the-meter), so wiring it as the inflexible load makes this a SHADOW illustration, not a true dispatch.",
+    "prerequisite": "A meaningful 24h run needs CONTINUOUS ingestion of the inflexible sensor; the labems-3oh bridge is one-shot, so this is an open prerequisite (see shadow-g2.md)."
+  }
+}
