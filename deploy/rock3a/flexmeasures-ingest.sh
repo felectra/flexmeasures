@@ -32,9 +32,12 @@ until (exec 3<>"/dev/tcp/${BROKER_HOST}/${BROKER_PORT}") 2>/dev/null; do
 done
 exec 3>&- 2>/dev/null || true
 
-# Copy the versioned ingester into the container (idempotent; ephemeral, no image change).
+# Copy the versioned ingester and its pure-logic module into the container (idempotent; ephemeral, no
+# image change). continuous_ingest.py imports t2t_core, and both land in /tmp so the import resolves.
+podman cp "$HERE/t2t_core.py" "$SERVER:/tmp/t2t_core.py"
 podman cp "$HERE/continuous_ingest.py" "$SERVER:/tmp/continuous_ingest.py"
 
-# Subscribe-only stream -> in-container ingester (python -u so the heartbeat is unbuffered).
-mosquitto_sub -h 127.0.0.1 -t 'deye/#' -t 'jkbms/#' -v \
+# Subscribe-only stream -> in-container ingester. `-F '%j'` emits one JSON object per message, so a
+# newline inside a payload cannot forge a topic; `python -u` keeps the heartbeat unbuffered.
+mosquitto_sub -h 127.0.0.1 -t 'deye/#' -t 'jkbms/#' -F '%j' \
   | podman exec -i "$SERVER" python -u /tmp/continuous_ingest.py

@@ -1,0 +1,182 @@
+"""Self-contained regression tests for the labems-t2t pure logic (t2t_core).
+
+These import only t2t_core (standard-library only), so they run without the FlexMeasures app or a database.
+Run them with `pytest deploy/rock3a/test_t2t_core.py`.
+They cover the safety-critical behaviours a review flagged: JSON framing (embedded-newline payloads cannot forge a topic), the deny-list, elapsed-time staleness,
+retained-skip, monotonic-stamp seeding, and database-error classification.
+"""
+
+import json
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import t2t_core  # noqa: E402
+
+
+def _frame(topic, payload, retain=0):
+    return t2t_core.parse_frame(
+        json.dumps({"topic": topic, "payload": payload, "retain": retain})
+    )
+
+
+# --- JSON framing: a newline inside a payload can never become a second record / forge a topic ---
+
+
+def test_embedded_newline_payload_stays_one_frame():
+    line = json.dumps(
+        {"topic": "deye/ac/frequency", "payload": "50.0\nfake/topic 999", "retain": 0}
+    )
+    frame = t2t_core.parse_frame(line)
+    assert frame["topic"] == "deye/ac/frequency"
+    assert "\n" in frame["payload"]  # the newline is data, not a record boundary
+    status, reason = t2t_core.decide_reading(frame, t2t_core.StalenessGate(), 0.0)
+    assert (status, reason) == (
+        "skip",
+        "nonnumeric",
+    )  # the injected "fake/topic" never becomes a topic
+
+
+def test_payload_cannot_forge_a_forbidden_topic():
+    frame = _frame("deye/ac/frequency", "deye/battery/soc 100")
+    status, reason = t2t_core.decide_reading(frame, t2t_core.StalenessGate(), 0.0)
+    assert (status, reason) == ("skip", "nonnumeric")  # never turns into a soc write
+
+
+def test_parse_frame_rejects_junk():
+    assert t2t_core.parse_frame("") is None
+    assert t2t_core.parse_frame("not json") is None
+    assert t2t_core.parse_frame("[1,2,3]") is None
+    assert t2t_core.parse_frame(json.dumps({"payload": "5"})) is None  # no topic
+
+
+# --- deny-list ---
+
+
+def test_deny_list():
+    assert t2t_core.is_forbidden("deye/battery/soc")
+    assert t2t_core.is_forbidden("deye/bms/1/voltage")
+    assert not t2t_core.is_forbidden("deye/battery/power")
+    status, reason = t2t_core.decide_reading(
+        _frame("deye/bms/1/soc", "0"), t2t_core.StalenessGate(), 0.0
+    )
+    assert (status, reason) == ("skip", "forbidden")
+
+
+# --- elapsed-time staleness: a string goes stale from elapsed time even with no new data_age ---
+
+
+def test_stale_from_elapsed_time_without_new_data_age():
+    gate = t2t_core.StalenessGate()
+    gate.note_data_age("jkbms/string_a", "5", now_mono=1000.0, retained=False)
+    assert gate.is_stale("jkbms/string_a", 1000.0) is False  # fresh: 5 s
+    assert gate.is_stale("jkbms/string_a", 1050.0) is False  # 5 + 50 = 55 < 60
+    assert (
+        gate.is_stale("jkbms/string_a", 1058.0) is True
+    )  # 5 + 58 = 63 > 60, no new data_age needed
+
+
+def test_reading_skipped_when_string_stale():
+    gate = t2t_core.StalenessGate()
+    # No data_age seen yet -> fail closed.
+    status, reason = t2t_core.decide_reading(
+        _frame("jkbms/string_b/sensor/total_voltage/state", "48.9"), gate, 0.0
+    )
+    assert (status, reason) == ("skip", "stale")
+    # Fresh data_age opens the gate.
+    gate.note_data_age("jkbms/string_b", "3", now_mono=0.0, retained=False)
+    status, value = t2t_core.decide_reading(
+        _frame("jkbms/string_b/sensor/total_voltage/state", "48.9"), gate, 0.0
+    )
+    assert status == "accept" and value == 48.9
+
+
+def test_nan_and_negative_data_age_mark_stale():
+    gate = t2t_core.StalenessGate()
+    gate.note_data_age("jkbms/string_a", "5", 0.0, retained=False)
+    gate.note_data_age("jkbms/string_a", "nan", 1.0, retained=False)
+    assert gate.is_stale("jkbms/string_a", 1.0) is True
+    gate.note_data_age("jkbms/string_a", "3", 2.0, retained=False)
+    assert gate.is_stale("jkbms/string_a", 2.0) is False
+    gate.note_data_age("jkbms/string_a", "-1", 3.0, retained=False)
+    assert gate.is_stale("jkbms/string_a", 3.0) is True
+
+
+# --- retained-skip: retained frames are dropped and never open the gate ---
+
+
+def test_retained_frames_skipped_and_do_not_open_gate():
+    gate = t2t_core.StalenessGate()
+    # A retained data_age must NOT open the gate.
+    status, reason = t2t_core.decide_reading(
+        _frame("jkbms/string_a/sensor/data_age/state", "1", retain=1), gate, 0.0
+    )
+    assert (status, reason) == ("skip", "retained")
+    assert gate.is_stale("jkbms/string_a", 0.0) is True  # still closed
+    # A retained sensor reading is dropped outright.
+    status, reason = t2t_core.decide_reading(
+        _frame("deye/ac/frequency", "50.0", retain=1), gate, 0.0
+    )
+    assert (status, reason) == ("skip", "retained")
+
+
+# --- monotonic-stamp seeding: survives a restart / backward clock step ---
+
+
+def test_monotonic_stamp_bumps_past_seed():
+    seed = datetime(2026, 9, 3, 8, 0, 0, tzinfo=timezone.utc)
+    last_ts = {7: seed}  # as if seeded from the DB
+    now = seed - timedelta(seconds=5)  # a backward clock step
+    stamped = t2t_core.next_monotonic_stamp(last_ts, 7, now)
+    assert stamped == seed + timedelta(microseconds=1)
+    again = t2t_core.next_monotonic_stamp(last_ts, 7, now)
+    assert again == seed + timedelta(microseconds=2)  # strictly increasing
+
+
+def test_monotonic_stamp_passes_through_when_ahead():
+    last_ts = {}
+    now = datetime(2026, 9, 3, 8, 0, 0, tzinfo=timezone.utc)
+    assert t2t_core.next_monotonic_stamp(last_ts, 7, now) == now
+
+
+# --- database-error classification ---
+
+
+def test_classify_db_error_by_mro_names():
+    # Mimic the SQLAlchemy hierarchy so this runs without the library and still catches the regression:
+    # if DBAPIError were treated as transient, IntegrityError (which inherits it) would be misclassified.
+    class DBAPIError(Exception):
+        pass
+
+    class DatabaseError(DBAPIError):
+        pass
+
+    class OperationalError(DatabaseError):
+        pass
+
+    class IntegrityError(DatabaseError):
+        pass
+
+    assert t2t_core.classify_db_error(OperationalError()) == "transient"
+    assert (
+        t2t_core.classify_db_error(IntegrityError()) == "row"
+    )  # MRO includes DBAPIError, still row
+    assert t2t_core.classify_db_error(DBAPIError()) == "row"
+
+
+def test_classify_db_error_with_real_sqlalchemy():
+    exc = pytest.importorskip("sqlalchemy.exc")
+
+    def make(cls):
+        return cls("stmt", {}, Exception("orig"))
+
+    assert t2t_core.classify_db_error(make(exc.OperationalError)) == "transient"
+    assert t2t_core.classify_db_error(make(exc.InterfaceError)) == "transient"
+    # These inherit from DBAPIError but are deterministic row faults, not transient.
+    assert t2t_core.classify_db_error(make(exc.IntegrityError)) == "row"
+    assert t2t_core.classify_db_error(make(exc.DataError)) == "row"
+    assert t2t_core.classify_db_error(make(exc.ProgrammingError)) == "row"

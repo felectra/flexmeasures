@@ -14,6 +14,7 @@ New features
 Infrastructure / Support
 -------------------------
 * Shrink the Docker image by excluding dev-only dependencies, pruning stray ``docs``/``examples`` payloads bundled by ``sktime``/``scikit-base`` (issue: https://github.com/sktime/sktime/issues/10891), stripping the symbol tables that the compiled extensions ship with, and dropping the ``sktime``-backed belief-formation extra of ``timely-beliefs``, which FlexMeasures does not use [see `PR #2438 <https://www.github.com/FlexMeasures/flexmeasures/pull/2438>`_, `PR #2439 <https://www.github.com/FlexMeasures/flexmeasures/pull/2439>`_ and `PR #2440 <https://www.github.com/FlexMeasures/flexmeasures/pull/2440>`_]
+* Add a continuous, subscribe-only MQTT-to-FlexMeasures ingestion service for the ROCK 3A pilot (``deploy/rock3a``), with a per-string BLE staleness gate, JSON message framing, and reboot-surviving rootless systemd autostart [see `PR #XXXX <https://www.github.com/FlexMeasures/flexmeasures/pull/XXXX>`_]
 
 Bugfixes
 -----------

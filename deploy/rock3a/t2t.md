@@ -6,115 +6,128 @@ sensors without gaps, so the shadow scheduler (labems-sc9) and any later work ha
 continuously-updated inputs.
 
 **Subscribe-only.**
-The Python ingester instantiates no MQTT client; it reads `topic payload` lines from a persistent
-host-side `mosquitto_sub -v` and writes only the FlexMeasures database.
+The Python ingester instantiates no MQTT client; it reads one JSON object per line from a persistent
+host-side `mosquitto_sub -F '%j'` and writes only the FlexMeasures database.
 Nothing is ever published to the broker, and no command reaches the bridge, inverter, or BMS boards.
 
 ## Files (versioned in `deploy/rock3a/`)
 
 | File | sha256 (short) | Role |
 |---|---|---|
-| `continuous_ingest.py` | `b24b6a9a5e16` | The continuous ingester (runs inside `rock3a_server_1`). It self-hashes at startup and logs `sha256=…`. |
-| `flexmeasures-ingest.sh` | `77de5c48eaba` | Wrapper: waits for the container and the broker, copies the ingester in, runs the subscribe→ingest pipeline. |
+| `t2t_core.py` | `d8f5f0166fad` | Pure, standard-library-only decision logic (framing, deny-list, staleness gate, stamp, DB-error class). Unit-tested. |
+| `continuous_ingest.py` | `90cd425bd528` | Thin shell: owns the app context + DB, runs the loop, imports `t2t_core`. Self-hashes at startup. |
+| `flexmeasures-ingest.sh` | `e37c786746b5` | Wrapper: waits for the container and broker, copies both modules in, runs the subscribe→ingest pipeline. |
 | `flexmeasures-ingest.service` | `ae7e5e0a976f` | systemd **user** unit `flexmeasures-ingest.service`: `Restart=always`, start-limit disabled, ordered after the compose stack. |
+| `test_t2t_core.py` | — | Self-contained regression tests for `t2t_core` (`pytest deploy/rock3a/test_t2t_core.py`). |
 
-Authoritative hashes: `sha256sum deploy/rock3a/continuous_ingest.py deploy/rock3a/flexmeasures-ingest.sh
-deploy/rock3a/flexmeasures-ingest.service`; the ingester also prints its own hash to the journal on
-every start.
+Authoritative hashes: `sha256sum deploy/rock3a/t2t_core.py deploy/rock3a/continuous_ingest.py
+deploy/rock3a/flexmeasures-ingest.sh deploy/rock3a/flexmeasures-ingest.service`; the ingester also
+logs its own hash on every start.
 
 ## Design
 
-- **Reuses the 3oh guards.** Topic→sensor map from `attributes["source_topic"]`, one `mqtt-ingest`
-  DataSource (shared with 3oh), the forbidden-source deny-list, the `math.isfinite` drop, and a
-  per-sensor strictly-increasing arrival stamp.
-- **Deny-list (no exceptions).** `deye/battery/soc` and the whole `deye/bms/*` group are dropped in
-  the ingester before mapping or parsing, independent of what the DB binds (`skipped_forbidden`).
-- **Timestamp on arrival.** Payloads carry no timestamp; `event_start = belief_time = arrival time`
-  (UTC), matching the instantaneous (`event_resolution = 0`) sensors.
-- **Monotonic stamp survives restarts.** On start, the per-sensor stamp is seeded from the newest
-  stored belief for the `mqtt-ingest` source, so a restart or a backward clock step cannot produce a
-  timestamp that collides with a stored belief on the `TimedBelief` primary key.
-- **Batched commits with salvage.** Beliefs commit roughly every 200 lines or 10 s; a failed batch is
-  rolled back and retried **row by row** (`commit_row_errors`), so one poisoned row never loses the
-  rest, and nothing crashes the service.
-- **Robust framing.** stdin is read byte by byte with its own line buffer, so partial lines never
-  block the commit/heartbeat timers, invalid UTF-8 is replaced (never crashes), and an over-long
-  unterminated blob is dropped rather than growing without bound.
-- **Heartbeat.** Every 60 s the ingester prints its counters to stderr → the journal. `committed` is
-  the durable count; `ingested` is lines accepted for writing (before the commit lands).
+- **JSON framing.** `mosquitto_sub -F '%j'` emits one JSON object per message (`topic`, `payload`,
+  `retain`, `tst`); a newline inside a payload is escaped within the JSON string, so a payload can
+  never be read as a second record and **forge a topic that slips past the deny-list**.
+- **Deny-list (no exceptions).** `deye/battery/soc` and the whole `deye/bms/*` group are dropped
+  before mapping, independent of what the DB binds (`skipped_forbidden`).
+- **Account-scoped map.** Only the account-1 sensors' `source_topic`s are mapped; a duplicate topic
+  within scope is logged and skipped, never a hard exit (a hard exit would be a permanent restart
+  loop for a live service).
+- **Timestamp on arrival, monotonic across restarts.** `event_start = belief_time = arrival time`
+  (UTC); the per-sensor stamp is seeded from the newest stored belief for the `mqtt-ingest` source,
+  so a restart or a backward clock step cannot collide with a stored belief on the primary key.
+- **Batched commits, transient vs row.** Beliefs commit every ~200 lines or ~10 s. A deterministic
+  row error salvages the batch **row by row** (`commit_row_errors`); a transient DB/connection error
+  **keeps the batch** and, after a few backed-off retries, exits so systemd restarts it — a database
+  outage never triggers row-by-row deletion of good data.
+- **Circuit breaker.** One malformed line is contained, but after 100 *unexpected* per-line
+  exceptions the service exits non-zero, so a systematic bug can't leave it "active" while rejecting
+  every line.
+- **Robust framing.** stdin is read byte by byte with its own line buffer; partial lines never block
+  the timers, invalid UTF-8 is replaced, and an oversized unterminated frame is discarded up to the
+  next delimiter.
+- **Heartbeat.** Every 60 s the counters print to stderr → the journal. `committed` is the durable
+  count; `ingested` is messages accepted for writing before the commit lands.
 
-## The `data_age > 60 s` staleness rule (fail-closed)
+## The `data_age` staleness rule (elapsed-time, fail-closed)
 
 Each JK-BMS publishes `jkbms/string_<x>/sensor/data_age/state`, the age of the last BLE read.
-The ingester tracks the latest `data_age` per string and **fails closed**: a string is stale — its
-readings skipped (`skipped_stale`) — until it reports a fresh `data_age ≤ 60`, and again whenever the
-last-seen `data_age` exceeds 60 s, or is missing, `nan`, or negative.
-The latch is updated from every `data_age` line before the gate and before the mapping step, so it is
-correct even if messages arrive out of order (retained topics) and even if the `data_age` sensor were
-unmapped.
-This is a second line of defence beyond the `nan` drop (a dropped string also emits `nan`, which
-`math.isfinite` rejects).
-Deye topics have no string prefix and are never gated by this rule.
+The gate stores, per string, the **last reported age and the monotonic time it was received**, and a
+string is stale — its readings skipped (`skipped_stale`) — when any of these hold:
+
+- no live (non-retained) `data_age` has been seen yet (fail closed on startup), or
+- the **effective age** = reported age + seconds elapsed since it was received exceeds 60 s, or
+- the last `data_age` observation is itself older than a 90 s horizon.
+
+Because the gate ages with elapsed time, a **BLE dropout closes it even though `data_age` stops
+arriving** — the exact failure the raw last-value latch missed.
+Retained `data_age` messages are ignored (their original time is unknown), so a retained replay after
+a reboot can never re-open a string on stale values; the string opens only on a fresh live reading.
+An unparsable, `nan`, or negative `data_age` marks the string stale immediately.
+Deye topics have no string prefix and are never gated.
 
 ## Reconnect and backoff (the hlj broker-down window)
 
-The `labems-hlj` startup guard holds the broker **unavailable for ~60–90 s after each reboot** (it
+The `labems-hlj` startup guard holds the broker unavailable for **~60–90 s after each reboot** (it
 waits for the `.22` WiFi address and Tailscale before `mosquitto` binds).
-The service must therefore reconnect with backoff, not fail after one attempt.
-Three mechanisms make that explicit:
 
-- **The wrapper waits for the broker.** Before starting the pipeline it polls `127.0.0.1:1883` with a
-  bare TCP reachability check (open+close a socket — it never publishes), retrying every 3 s until the
-  broker binds. So during the post-reboot window the wrapper *blocks patiently* rather than exiting.
-- **The unit disables the start rate limit.** `StartLimitIntervalSec=0` in `[Unit]` means the expected
-  restarts during the broker-down window can never trip systemd's default 5-in-10 s limit and
-  permanently fail the unit. `Restart=always` with `RestartSec=5` paces retries (5 s apart) so they
-  back off rather than hammer.
-- **Broker death mid-stream is a clean exit.** If the broker drops while running, `mosquitto_sub`
-  exits, `set -o pipefail` fails the pipeline, the wrapper exits, and systemd restarts it — which then
-  waits for the broker again and resumes.
+- **Initial connect after a reboot:** `mosquitto_sub` exits if its *first* connect is refused, so the
+  wrapper first waits for `127.0.0.1:1883` with a bare TCP reachability check (open+close a socket —
+  it never publishes), retrying every 3 s. During the window the wrapper *blocks patiently* rather
+  than churning restarts.
+- **Mid-stream broker blips:** once connected, `mosquitto_sub` (libmosquitto `loop_forever`) **auto-
+  reconnects** on a dropped broker, so a transient broker restart does **not** tear down the pipeline
+  — Python simply sees a quiet gap and resumes. So "broker loss" is normally handled inside
+  `mosquitto_sub`, not by a systemd restart.
+- **Container / `podman exec` death:** if the server container or the exec dies, the pipeline exits
+  and systemd restarts it; `StartLimitIntervalSec=0` (start-limit disabled) plus `Restart=always`,
+  `RestartSec=5` mean the expected post-reboot restarts never trip systemd's default 5-in-10 s limit
+  and permanently fail the unit.
 
-**Recovery target ≤ 10 min per reboot** (in practice seconds-to-a-minute: the stack + hlj guard settle
-in ~60–90 s, then the wrapper connects on its next 3 s poll and flow resumes).
-
-Note on prompt restart: if the *Python* side dies while `mosquitto_sub` stays connected, `bash`
-notices the broken pipe only on the subscriber's next write; because the bench always publishes within
-one polling period (deye ~60 s, jkbms ~10–13 s), that is detected within ≤ ~60 s — well inside the
-recovery ceiling.
+**Recovery target ≤ 10 min per reboot** (in practice seconds-to-a-minute: the stack + hlj guard
+settle in ~60–90 s, then the wrapper connects on its next 3 s poll and flow resumes).
 
 ## Reboot survival and ordering
 
-The pilot runs the whole compose project as the user service `flexmeasures-pilot.service` with
-lingering enabled (README §7).
-`flexmeasures-ingest.service` is `Wants=`/`After=flexmeasures-pilot.service`, so it starts after the
-stack.
-Because the compose unit is `oneshot` (`RemainAfterExit`), it "completes" while the containers are
-still starting, so the wrapper additionally **waits for `rock3a_server_1` to be running** before
-feeding it.
-Lingering (already enabled) starts user services at boot without a login, so the ingester returns on
-its own after a reboot.
+`flexmeasures-ingest.service` is `Wants=`/`After=flexmeasures-pilot.service` (the rootless compose
+stack, README §7).
+Because that unit is `oneshot` (`RemainAfterExit`), it "completes" while containers are still
+starting, so the wrapper additionally **waits for `rock3a_server_1` to be running**.
+Lingering (already enabled) autostarts user services at boot without a login.
 
-## Stop semantics
+## Stop and data-loss semantics (honest)
 
-The unit's main process is `bash`; the Python ingester runs inside the container via `podman exec`, so
-systemd's `SIGTERM` is not guaranteed to reach it directly.
-The **reliable** graceful path is stdin EOF: on stop, `mosquitto_sub` is killed, its pipe closes,
-Python reaches EOF and commits its pending batch in the `finally` block.
-Worst case (an abrupt kill mid-batch) loses at most one ≤10 s / ≤200-belief batch — re-populated by the
-stream on restart — so no meaningful data is lost.
+On `systemctl stop`, systemd terminates the cgroup: `mosquitto_sub` dies, its pipe closes, and the
+ingester reaches stdin EOF (SIGTERM is also caught, and both paths run the same final flush).
+The pending batch is then committed — **unless the database is unavailable at that moment**, in which
+case up to one batch (≤200 beliefs / ≤10 s) is lost: the MQTT stream is QoS 0 and is **not** replayed,
+so those in-flight readings do not come back on restart.
+That loss is counted (`lost_beliefs`) and the process exits non-zero.
+This is the one acknowledged data-loss window; steady-state operation loses nothing, and a database
+outage of any length costs only the ≤10 s in flight.
 `TimeoutStopSec=20` bounds the stop.
+
+## Belief-storage growth — a known risk (owner decision)
+
+At the bench cadence (deye ~1/60 s × 18 sensors, jkbms ~1/10–13 s × 20 sensors) the service writes
+roughly **179 k beliefs/day ≈ 5.4 M/month**, order **~1 GB/month** including indexes, on the board's
+**14.5 GB eMMC** (already partly used by the stack and the DB).
+That is fine for the ≥24 h sc9 run and near-term work, but **unbounded growth will fill the eMMC in a
+few months**.
+Downsampling / retention is **not implemented here** (out of scope for build-only and unnecessary for
+sc9); it should be an **owner decision and a likely follow-up bead** — e.g. a retention window on raw
+beliefs, periodic downsampling to a coarser resolution, or moving the DB volume to larger storage.
 
 ## Logging and rotation
 
 Logs go to the **user journal** (`SyslogIdentifier=fm-ingest`; the unit is
 `flexmeasures-ingest.service`).
-Read them by unit — `journalctl --user -u flexmeasures-ingest` (add `-f` to follow) — or by identifier,
+Read them by unit — `journalctl --user -u flexmeasures-ingest` (add `-f`) — or by identifier,
 `journalctl --user -t fm-ingest`.
-Rotation is journald's: it caps its own store and vacuums old entries.
-The volume is tiny — one heartbeat line per minute (~1.5 k lines/day) plus occasional error lines.
+Rotation is journald's; the volume is tiny (~1 heartbeat line/minute).
 On the small eMMC, bound the journal by setting `SystemMaxUse=` (e.g. `200M`) in
-`/etc/systemd/journald.conf` and running `journalctl --vacuum-size=200M` (a host-wide change the owner
-makes once; not part of this service).
+`/etc/systemd/journald.conf` (a one-time host change the owner makes).
 
 ## Apply steps — RUN LATER, not executed here
 
@@ -131,36 +144,48 @@ cp deploy/rock3a/flexmeasures-ingest.service ~/.config/systemd/user/flexmeasures
 systemctl --user daemon-reload
 systemctl --user enable --now flexmeasures-ingest.service
 systemctl --user status flexmeasures-ingest.service
-loginctl show-user sd -p Linger        # expect Linger=yes (already enabled in README §0)
+loginctl show-user sd -p Linger        # expect Linger=yes
 ```
 
 ## Verify ≥15 min of continuous flow
 
 ```bash
-# 1. Watch the heartbeat (every 60 s); `ingested`/`committed` climb, skipped_forbidden climbs
-#    (deny-list active), skipped_stale rises only during a BLE dropout.
+# 1. Watch the heartbeat (every 60 s): ingested/committed climb, skipped_forbidden climbs (deny-list
+#    active), skipped_stale rises only during a BLE dropout.
 journalctl --user -u flexmeasures-ingest -f
 
-# 2. After ~15 min: all 38 account-1 sensors, from the mqtt-ingest source, have fresh beliefs.
+# 2. After ~15 min: how many of the 38 account-1 sensors got fresh beliefs, from the mqtt-ingest source.
 podman exec -i rock3a_db_1 psql -U fm_pilot -d fm_pilot -At -F '|' -c \
  "SELECT count(*) beliefs, count(DISTINCT tb.sensor_id) sensors, min(tb.event_start), max(tb.event_start)
   FROM timed_belief tb JOIN sensor s ON s.id=tb.sensor_id JOIN generic_asset ga ON ga.id=s.generic_asset_id
   JOIN data_source d ON d.id=tb.source_id
   WHERE ga.account_id=1 AND d.name='mqtt-ingest' AND tb.event_start > now() - interval '15 min';"
-#    Expect sensors=38 (or 36 if a string is legitimately stale — cross-check skipped_stale).
+#    Expect sensors=38; 28 if one JK string is legitimately stale (its 10 sensors drop out), 18 if
+#    both — cross-check against skipped_stale in the heartbeat.
 
-# 3. Per-sensor largest gap over the window (should be within the polling period: deye ~60 s, jkbms 10-13 s).
-#    Sensors with 0-1 rows show as NULL and are themselves a red flag (a bound sensor got no data).
+# 3. Per-sensor largest gap (valid Postgres: lag() in a CTE, then max() in the outer aggregate).
+#    Gaps should be within the polling period (deye ~60 s, jkbms 10-13 s).
 podman exec -i rock3a_db_1 psql -U fm_pilot -d fm_pilot -At -F '|' -c \
- "WITH w AS (SELECT tb.sensor_id, tb.event_start FROM timed_belief tb JOIN data_source d ON d.id=tb.source_id
-             WHERE d.name='mqtt-ingest' AND tb.event_start > now() - interval '15 min')
-  SELECT s.id, s.name,
-         EXTRACT(EPOCH FROM max(w.event_start) OVER (PARTITION BY w.sensor_id)) IS NOT NULL AS has_data,
-         max(EXTRACT(EPOCH FROM w.event_start - lag(w.event_start) OVER (PARTITION BY w.sensor_id ORDER BY w.event_start))) max_gap_s
-  FROM w JOIN sensor s ON s.id=w.sensor_id GROUP BY s.id, s.name ORDER BY max_gap_s DESC NULLS FIRST;"
+ "WITH pts AS (
+     SELECT tb.sensor_id, tb.event_start,
+            tb.event_start - lag(tb.event_start) OVER (PARTITION BY tb.sensor_id ORDER BY tb.event_start) AS gap
+     FROM timed_belief tb
+     JOIN data_source d ON d.id=tb.source_id
+     JOIN sensor s ON s.id=tb.sensor_id
+     JOIN generic_asset ga ON ga.id=s.generic_asset_id
+     WHERE ga.account_id=1 AND d.name='mqtt-ingest' AND tb.event_start > now() - interval '15 min')
+  SELECT s.id, s.name, count(*) n, max(EXTRACT(EPOCH FROM pts.gap)) max_gap_s
+  FROM pts JOIN sensor s ON s.id=pts.sensor_id GROUP BY s.id, s.name ORDER BY max_gap_s DESC NULLS LAST;"
 
-# 4. Deny-list holds: no belief exists on any forbidden topic (there is no such sensor; this is 0 by construction).
-#    Confirm from the heartbeat that skipped_forbidden > 0 (soc + bms lines are arriving and being dropped).
+# 4. Deny-list assertion (executable): no account-1 belief may exist on a sensor bound to a forbidden source.
+podman exec -i rock3a_db_1 psql -U fm_pilot -d fm_pilot -At -c \
+ "SELECT count(*) AS forbidden_beliefs
+  FROM timed_belief tb
+  JOIN sensor s ON s.id=tb.sensor_id
+  JOIN generic_asset ga ON ga.id=s.generic_asset_id
+  WHERE ga.account_id=1 AND (s.attributes->>'source_topic') ~ '^(deye/battery/soc|deye/bms/)';"
+#    Must be 0 — an invariant (no account-1 sensor is bound to a forbidden topic). Also confirm
+#    skipped_forbidden > 0 in the heartbeat, to see the deny-list actively dropping soc/bms lines.
 ```
 
 ## Prove autostart after a reboot (recovery time)
@@ -178,10 +203,19 @@ podman exec -i rock3a_db_1 psql -U fm_pilot -d fm_pilot -At -c \
   WHERE d.name='mqtt-ingest' AND tb.event_start > timestamptz '$(uptime -s)';"
 ```
 
+## Tests
+
+`pytest deploy/rock3a/test_t2t_core.py` runs the self-contained regression tests (import only
+`t2t_core`, no app or DB): JSON framing incl. embedded-newline payload safety, the deny-list,
+elapsed-time staleness (stale from elapsed time with no new `data_age`), retained-skip, monotonic-stamp
+seeding, and DB-error classification.
+Fail-first was verified by breaking the elapsed-expiry line, which turns
+`test_stale_from_elapsed_time_without_new_data_age` red.
+
 ## STOP conditions
 
-- **Pause:** `systemctl --user stop flexmeasures-ingest` — the subscriber is killed, Python sees EOF and
-  commits its pending batch, then exits.
+- **Pause:** `systemctl --user stop flexmeasures-ingest` — the subscriber is killed, Python sees EOF
+  and commits its pending batch, then exits.
 - **Disable permanently:** `systemctl --user disable --now flexmeasures-ingest`.
 - **Do not apply during the Plan D window** (host change); wait until the coordinator/owner clears it.
 - The service self-throttles when the stack or broker is down: the wrapper waits for both, and
@@ -190,12 +224,12 @@ podman exec -i rock3a_db_1 psql -U fm_pilot -d fm_pilot -At -c \
 
 ## Open decisions for YellowHeron / owner
 
-- **Quadlet vs user unit.** A plain user unit is used (matches the existing `flexmeasures-pilot.service`
-  pattern, needs no new tooling); a Quadlet adds no benefit here, since the ingester runs *inside* the
-  existing server container rather than as its own container.
-- **Script delivery.** The wrapper `podman cp`s the ingester into the container at each start
-  (idempotent, no image change, no container recreation — safe during a freeze). A future refinement
-  could mount `deploy/rock3a` into the container via the compose file, but that needs a container
-  recreation and is out of scope for build-only.
-- **Journal cap on the small eMMC.** Setting `SystemMaxUse=` is a one-time host change the owner may
-  want to make alongside enabling the service.
+- **Belief retention / downsampling** (above) — the main follow-up: unbounded growth fills the 14.5 GB
+  eMMC in a few months.
+- **Quadlet vs user unit** — a plain user unit is used (matches `flexmeasures-pilot.service`, no new
+  tooling); a Quadlet adds no benefit, since the ingester runs *inside* the existing server container.
+- **Script delivery** — the wrapper `podman cp`s both modules in at each start (idempotent, no image
+  change, freeze-safe); a future refinement could mount `deploy/rock3a` via the compose file, but that
+  needs a container recreation.
+- **Journal cap** — setting `SystemMaxUse=` is a one-time host change to make alongside enabling the
+  service.
