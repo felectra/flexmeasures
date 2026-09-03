@@ -180,3 +180,29 @@ def test_classify_db_error_with_real_sqlalchemy():
     assert t2t_core.classify_db_error(make(exc.IntegrityError)) == "row"
     assert t2t_core.classify_db_error(make(exc.DataError)) == "row"
     assert t2t_core.classify_db_error(make(exc.ProgrammingError)) == "row"
+
+
+# --- byte framing: bounded reassembly, oversized drop, discard-resync ---
+
+
+def test_line_assembler_reassembles_across_chunks():
+    a = t2t_core.LineAssembler()
+    assert list(a.feed(b"deye/ac/fre")) == []
+    assert list(a.feed(b"q 50\ndeye/ac/x 1\n")) == ["deye/ac/freq 50", "deye/ac/x 1"]
+
+
+def test_line_assembler_drops_oversized_complete_line_but_keeps_others():
+    a = t2t_core.LineAssembler(max_line_bytes=8)
+    out = list(a.feed(b"waytoolongline 1\nok 2\n"))
+    assert out == ["ok 2"]
+    assert a.dropped == 1
+
+
+def test_line_assembler_discards_unterminated_oversized_bounded_then_resyncs():
+    a = t2t_core.LineAssembler(max_line_bytes=8)
+    assert list(a.feed(b"0123456789")) == []  # >8 bytes, no newline
+    assert a.dropped == 1
+    assert a._buf == b""  # buffer stays bounded while discarding
+    assert list(a.feed(b"still-no-newline-here")) == []
+    assert a._buf == b""  # still bounded
+    assert list(a.feed(b"tail\ngood 1\n")) == ["good 1"]  # resync past the delimiter

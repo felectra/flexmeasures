@@ -17,6 +17,8 @@ STALE_AGE_SECONDS = 60.0
 # If no data_age has been received within this horizon, the string is stale even without a new value,
 # so a BLE dropout that stops data_age updates still closes the gate.
 STALE_OBSERVATION_HORIZON_SECONDS = 90.0
+# A single record longer than this is dropped, so a broken stream cannot exhaust memory on the board.
+MAX_LINE_BYTES = 1_000_000
 
 # SQLAlchemy error class names that mean the database or connection is at fault, so the whole batch
 # should be retried rather than salvaged row by row.
@@ -80,6 +82,46 @@ def parse_frame(line):
         "retain": bool(obj.get("retain")),
         "tst": obj.get("tst"),
     }
+
+
+class LineAssembler:
+    """Reassemble newline-delimited records from arbitrary byte chunks, with a bounded buffer.
+
+    A record with no delimiter within max_line_bytes, or a complete line longer than it, is dropped and counted, and the assembler resynchronizes at the next delimiter.
+    The buffer never grows without bound: while discarding an oversized record it keeps at most one chunk, so a broken or hostile stream cannot exhaust memory.
+    """
+
+    def __init__(self, max_line_bytes=MAX_LINE_BYTES):
+        self.max_line_bytes = max_line_bytes
+        self._buf = b""
+        self._discarding = False
+        self.dropped = 0
+
+    def feed(self, chunk):
+        """Yield each complete record in chunk as a decoded str (UTF-8, invalid bytes replaced)."""
+        self._buf += chunk
+        if self._discarding:
+            newline = self._buf.find(b"\n")
+            if newline == -1:
+                self._buf = b""  # still no delimiter: drop, stay bounded
+                return
+            self._buf = self._buf[newline + 1 :]  # resynchronize past the delimiter
+            self._discarding = False
+        while True:
+            newline = self._buf.find(b"\n")
+            if newline == -1:
+                if len(self._buf) > self.max_line_bytes:
+                    # An unterminated oversized record: drop it and discard until the next delimiter.
+                    self.dropped += 1
+                    self._discarding = True
+                    self._buf = b""
+                return
+            rawline = self._buf[:newline]
+            self._buf = self._buf[newline + 1 :]
+            if len(rawline) > self.max_line_bytes:
+                self.dropped += 1  # a complete but oversized line: drop it, keep going
+                continue
+            yield rawline.decode("utf-8", "replace")
 
 
 class StalenessGate:

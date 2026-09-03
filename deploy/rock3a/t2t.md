@@ -2,8 +2,8 @@
 
 The one-shot `mqtt_ingest.py` (labems-3oh) captures a short window and exits.
 `labems-t2t` turns that into a **continuous, reboot-surviving service** that feeds the 38 bound
-sensors without gaps, so the shadow scheduler (labems-sc9) and any later work have real,
-continuously-updated inputs.
+sensors with no gaps while the stack is healthy, so the shadow scheduler (labems-sc9) and any later
+work have real, continuously-updated inputs.
 
 **Subscribe-only.**
 The Python ingester instantiates no MQTT client; it reads one JSON object per line from a persistent
@@ -14,8 +14,8 @@ Nothing is ever published to the broker, and no command reaches the bridge, inve
 
 | File | sha256 (short) | Role |
 |---|---|---|
-| `t2t_core.py` | `d8f5f0166fad` | Pure, standard-library-only decision logic (framing, deny-list, staleness gate, stamp, DB-error class). Unit-tested. |
-| `continuous_ingest.py` | `90cd425bd528` | Thin shell: owns the app context + DB, runs the loop, imports `t2t_core`. Self-hashes at startup. |
+| `t2t_core.py` | `127ae561b166` | Pure, standard-library-only decision logic (framing, deny-list, staleness gate, line assembler, stamp, DB-error class). Unit-tested. |
+| `continuous_ingest.py` | `835b51a92b7f` | Thin shell: owns the app context + DB, runs the loop, imports `t2t_core`. Self-hashes at startup. |
 | `flexmeasures-ingest.sh` | `e37c786746b5` | Wrapper: waits for the container and broker, copies both modules in, runs the subscribe→ingest pipeline. |
 | `flexmeasures-ingest.service` | `ae7e5e0a976f` | systemd **user** unit `flexmeasures-ingest.service`: `Restart=always`, start-limit disabled, ordered after the compose stack. |
 | `test_t2t_core.py` | — | Self-contained regression tests for `t2t_core` (`pytest deploy/rock3a/test_t2t_core.py`). |
@@ -101,11 +101,13 @@ Lingering (already enabled) autostarts user services at boot without a login.
 On `systemctl stop`, systemd terminates the cgroup: `mosquitto_sub` dies, its pipe closes, and the
 ingester reaches stdin EOF (SIGTERM is also caught, and both paths run the same final flush).
 The pending batch is then committed — **unless the database is unavailable at that moment**, in which
-case up to one batch (≤200 beliefs / ≤10 s) is lost: the MQTT stream is QoS 0 and is **not** replayed,
-so those in-flight readings do not come back on restart.
-That loss is counted (`lost_beliefs`) and the process exits non-zero.
-This is the one acknowledged data-loss window; steady-state operation loses nothing, and a database
-outage of any length costs only the ≤10 s in flight.
+case the in-flight batch is lost: the MQTT stream is QoS 0 and is **not** replayed, so those readings
+do not come back on restart.
+That in-flight batch is counted (`lost_beliefs`) and the process exits non-zero.
+Be precise about a **prolonged** outage, though: while the database is down the service cannot store
+anything, and because the stream is QoS 0, **every reading published during the outage is lost**, not
+only the in-flight batch — `lost_beliefs` counts just the batch held at exit, not the whole outage.
+Steady-state operation (database healthy) loses nothing.
 `TimeoutStopSec=20` bounds the stop.
 
 ## Belief-storage growth — a known risk (owner decision)
@@ -199,8 +201,11 @@ systemctl --user show flexmeasures-ingest -p ActiveEnterTimestamp
 journalctl --user -u flexmeasures-ingest --since "$(uptime -s)" | grep '\[t2t\] started'   # first start after boot
 # recovery time = first belief after boot vs boot time (target ≤ 10 min):
 podman exec -i rock3a_db_1 psql -U fm_pilot -d fm_pilot -At -c \
- "SELECT min(tb.event_start) FROM timed_belief tb JOIN data_source d ON d.id=tb.source_id
-  WHERE d.name='mqtt-ingest' AND tb.event_start > timestamptz '$(uptime -s)';"
+ "SELECT min(tb.event_start) FROM timed_belief tb
+  JOIN data_source d ON d.id=tb.source_id
+  JOIN sensor s ON s.id=tb.sensor_id
+  JOIN generic_asset ga ON ga.id=s.generic_asset_id
+  WHERE ga.account_id=1 AND d.name='mqtt-ingest' AND tb.event_start > timestamptz '$(uptime -s)';"
 ```
 
 ## Tests

@@ -35,11 +35,10 @@ BATCH_MAX_SECONDS = 10.0
 HEARTBEAT_SECONDS = 60.0
 SELECT_TIMEOUT_SECONDS = 5.0
 READ_CHUNK_BYTES = 65536
-MAX_LINE_BYTES = 1_000_000
 MAX_TRANSIENT_COMMIT_FAILURES = 5
 TRANSIENT_BACKOFF_SECONDS = 2.0
 MAX_UNEXPECTED_LINE_ERRORS = 100
-# Health: if this many lines flow across a heartbeat with zero durable commits, count it unhealthy;
+# Health: if this many records flow across a heartbeat with zero durable commits, count it unhealthy;
 # after this many such heartbeats in a row, exit so systemd restarts (deye alone should always commit).
 MIN_LINES_FOR_HEALTH = 20
 MAX_ZERO_COMMIT_HEARTBEATS = 5
@@ -62,6 +61,13 @@ def main():  # noqa: C901
         from flexmeasures.data.models.data_sources import DataSource
         from flexmeasures.data.models.generic_assets import GenericAsset
         from flexmeasures.data.models.time_series import Sensor, TimedBelief
+
+        def safe_rollback():
+            """Roll back the session, swallowing a rollback that itself fails during a connection flap."""
+            try:
+                db.session.rollback()
+            except SQLAlchemyError:
+                pass
 
         # Build topic -> sensor from the source_topic attribute set by seed-sensors.py, scoped to the
         # pilot account (the 38 bound sensors).
@@ -113,6 +119,7 @@ def main():  # noqa: C901
                 last_ts[sid] = mx if mx.tzinfo else mx.replace(tzinfo=timezone.utc)
 
         gate = t2t_core.StalenessGate()
+        assembler = t2t_core.LineAssembler()
         counters = {
             "lines": 0,
             "ingested": 0,
@@ -152,7 +159,7 @@ def main():  # noqa: C901
                 batch.clear()
                 return "ok"
             except SQLAlchemyError as exc:
-                db.session.rollback()
+                safe_rollback()
                 counters["commit_errors"] += 1
                 if t2t_core.classify_db_error(exc) == "transient":
                     print(
@@ -162,8 +169,8 @@ def main():  # noqa: C901
                     )
                     return "transient"
                 # A deterministic row error: salvage the good rows one by one, but stop and retain the
-                # remainder if the database itself drops out mid-salvage (so a transient outage during
-                # salvage cannot delete the rows we have not tried yet).
+                # remainder if the database itself drops out mid-salvage, so a transient outage during
+                # salvage cannot delete the rows we have not tried yet.
                 print(
                     f"[t2t] row error, salvaging batch of {len(batch)} row by row: {exc.__class__.__name__}",
                     file=sys.stderr,
@@ -175,11 +182,11 @@ def main():  # noqa: C901
                         db.session.commit()
                         counters["committed"] += 1
                     except SQLAlchemyError as row_exc:
-                        db.session.rollback()
+                        safe_rollback()
                         if t2t_core.classify_db_error(row_exc) == "transient":
                             del batch[
                                 :index
-                            ]  # drop the rows already committed/skipped, keep the rest
+                            ]  # drop the rows already committed, keep this one and the rest
                             print(
                                 f"[t2t] DB dropped out during salvage; retaining {len(batch)} beliefs",
                                 file=sys.stderr,
@@ -240,12 +247,11 @@ def main():  # noqa: C901
         last_heartbeat = start_mono
         prev_lines = 0
         prev_committed = 0
+        prev_dropped = 0
         zero_commit_heartbeats = 0
         transient_failures = 0
         exit_code = 0
         stdin_fd = sys.stdin.fileno()
-        buf = b""
-        discarding = False
         print(
             f"[t2t] started sha256={self_sha[:12]} source_id={source.id} mapped_topics={len(topic_to_sensor)}",
             file=sys.stderr,
@@ -267,25 +273,10 @@ def main():  # noqa: C901
                         # EOF: the upstream mosquitto_sub ended; exit non-zero so systemd restarts.
                         exit_code = 1
                         break
-                    buf += chunk
-                    while not discarding:
-                        newline = buf.find(b"\n")
-                        if newline == -1:
-                            if len(buf) > MAX_LINE_BYTES:
-                                # An unterminated oversized frame: discard until the next delimiter.
-                                counters["skipped_malformed"] += 1
-                                discarding = True
-                                buf = b""
-                            break
-                        rawline = buf[:newline]
-                        buf = buf[newline + 1 :]
-                        if len(rawline) > MAX_LINE_BYTES:
-                            # A complete but oversized line: drop it rather than parse it.
-                            counters["skipped_malformed"] += 1
-                            continue
+                    for line in assembler.feed(chunk):
                         counters["lines"] += 1
                         try:
-                            handle_line(rawline.decode("utf-8", "replace"))
+                            handle_line(line)
                         except (
                             Exception
                         ) as exc:  # contain one bad line, but trip the breaker on a storm
@@ -306,10 +297,12 @@ def main():  # noqa: C901
                                 )
                                 exit_code = 1
                                 raise SystemExit(exit_code)
-                    if discarding and b"\n" in buf:
-                        # The delimiter that ends the discarded oversized frame has arrived.
-                        buf = buf[buf.find(b"\n") + 1 :]
-                        discarding = False
+                    # Count dropped oversized records too, so an all-oversized storm still trips the breaker.
+                    dropped = assembler.dropped - prev_dropped
+                    if dropped:
+                        counters["lines"] += dropped
+                        counters["skipped_malformed"] += dropped
+                        prev_dropped = assembler.dropped
                 now_mono = time.monotonic()
                 if batch and (
                     len(batch) >= BATCH_MAX_LINES
@@ -343,15 +336,16 @@ def main():  # noqa: C901
                     last_heartbeat = now_mono
                     if zero_commit_heartbeats >= MAX_ZERO_COMMIT_HEARTBEATS:
                         print(
-                            "[t2t] lines flowing but nothing committed; exiting for a restart",
+                            "[t2t] records flowing but nothing committed; exiting for a restart",
                             file=sys.stderr,
                             flush=True,
                         )
                         exit_code = 1
                         break
         finally:
-            # Best-effort final flush; a DB outage here loses the in-flight batch (MQTT QoS 0 does not
-            # replay it), so report it honestly and make the exit non-zero.
+            # Best-effort final flush.
+            # A DB outage here loses the in-flight batch (MQTT QoS 0 does not replay it), so report it
+            # honestly and make the exit non-zero.
             if commit_batch() == "transient" or batch:
                 counters["lost_beliefs"] += len(batch)
                 print(
