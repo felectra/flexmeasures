@@ -12,6 +12,16 @@ set -euo pipefail
 SERVER=rock3a_server_1
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Make the subscriber config-independent. mosquitto_sub auto-reads $XDG_CONFIG_HOME/mosquitto_sub
+# (else ~/.config/mosquitto_sub), and such a file could carry --remove-retained (which PUBLISHES),
+# --will-topic, or --pretty/-N (which breaks the one-JSON-per-line framing). Point XDG_CONFIG_HOME at a
+# controlled empty directory we own, so no inherited user config is ever read — the subscribe-only and
+# framing guarantees must not depend on the host's config. A fixed per-service dir avoids leaking a new
+# mktemp dir on every restart, and we do not use $HOME/.config.
+XDG_EMPTY="${XDG_RUNTIME_DIR:-/tmp}/flexmeasures-ingest-xdg"
+mkdir -p "$XDG_EMPTY"
+export XDG_CONFIG_HOME="$XDG_EMPTY"
+
 # The compose service is oneshot (RemainAfterExit), so it "completes" while containers are still
 # starting. Wait until the FM server container is actually running before feeding it.
 until [ "$(podman inspect -f '{{.State.Running}}' "$SERVER" 2>/dev/null || true)" = "true" ]; do

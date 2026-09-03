@@ -206,3 +206,112 @@ def test_line_assembler_discards_unterminated_oversized_bounded_then_resyncs():
     assert list(a.feed(b"still-no-newline-here")) == []
     assert a._buf == b""  # still bounded
     assert list(a.feed(b"tail\ngood 1\n")) == ["good 1"]  # resync past the delimiter
+
+
+# --- classify: a connection-invalidating error is transient even with a non-transient class name ---
+
+
+def test_classify_connection_invalidated_is_transient():
+    class ProgrammingError(Exception):  # a name that classifies as a row fault
+        pass
+
+    exc = ProgrammingError("x")
+    assert t2t_core.classify_db_error(exc) == "row"
+    exc.connection_invalidated = True
+    assert t2t_core.classify_db_error(exc) == "transient"
+
+
+# --- salvage_batch: systematic failure is surfaced and lost rows are counted ---
+
+
+def test_salvage_batch_all_ok():
+    committed, lost, remaining, status = t2t_core.salvage_batch(
+        [1, 2, 3], lambda r: None, lambda: None
+    )
+    assert (committed, lost, remaining, status) == (3, 0, [], "ok")
+
+
+def test_salvage_batch_systematic_when_all_fail_nontransiently():
+    class ProgrammingError(Exception):
+        pass
+
+    def commit_one(row):
+        raise ProgrammingError("missing table")
+
+    committed, lost, remaining, status = t2t_core.salvage_batch(
+        [1, 2, 3], commit_one, lambda: None
+    )
+    assert committed == 0 and lost == 3 and remaining == [] and status == "systematic"
+
+
+def test_salvage_batch_transient_stops_and_retains_remainder():
+    class OperationalError(Exception):
+        pass
+
+    def commit_one(row):
+        if row == 2:
+            raise OperationalError("connection reset")
+
+    committed, lost, remaining, status = t2t_core.salvage_batch(
+        [1, 2, 3], commit_one, lambda: None
+    )
+    assert (
+        committed == 1 and lost == 0 and remaining == [2, 3] and status == "transient"
+    )
+
+
+def test_salvage_batch_partial_counts_lost_rows():
+    class ProgrammingError(Exception):
+        pass
+
+    def commit_one(row):
+        if row == 2:
+            raise ProgrammingError("bad row")
+
+    committed, lost, remaining, status = t2t_core.salvage_batch(
+        [1, 2, 3], commit_one, lambda: None
+    )
+    assert committed == 2 and lost == 1 and remaining == [] and status == "ok"
+
+
+# --- retain fails closed on a malformed/missing flag ---
+
+
+def test_parse_frame_retain_fail_closed():
+    def retain_of(value):
+        return t2t_core.parse_frame(
+            json.dumps({"topic": "t", "payload": "1", "retain": value})
+        )["retain"]
+
+    assert retain_of(0) is False
+    assert retain_of(1) is True
+    assert retain_of(True) is True
+    assert retain_of(False) is False
+    assert retain_of(None) is True  # fail closed
+    assert retain_of(2) is True  # fail closed
+    assert retain_of("1") is True  # fail closed
+    # A missing retain key also fails closed.
+    assert (
+        t2t_core.parse_frame(json.dumps({"topic": "t", "payload": "1"}))["retain"]
+        is True
+    )
+
+
+def test_retain_null_data_age_does_not_open_gate():
+    gate = t2t_core.StalenessGate()
+    da = json.dumps(
+        {
+            "topic": "jkbms/string_a/sensor/data_age/state",
+            "payload": "1",
+            "retain": None,
+        }
+    )
+    status, reason = t2t_core.decide_reading(t2t_core.parse_frame(da), gate, 0.0)
+    assert (status, reason) == ("skip", "retained")
+    assert (
+        gate.is_stale("jkbms/string_a", 0.0) is True
+    )  # the null-retain frame did NOT open the gate
+    gate.note_data_age("jkbms/string_a", "1", 0.0, retained=False)
+    assert (
+        gate.is_stale("jkbms/string_a", 0.0) is False
+    )  # a valid live data_age then opens it

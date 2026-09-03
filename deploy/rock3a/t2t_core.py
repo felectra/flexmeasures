@@ -76,10 +76,19 @@ def parse_frame(line):
         return None
     payload = obj.get("payload")
     payload = payload if isinstance(payload, str) else None
+    raw_retain = obj.get("retain")
+    if isinstance(raw_retain, bool):
+        retain = raw_retain
+    elif isinstance(raw_retain, int) and raw_retain in (0, 1):
+        retain = bool(raw_retain)
+    else:
+        # A missing, null, or malformed retain flag fails closed: the frame is treated as retained,
+        # so it is skipped and can never open the staleness gate.
+        retain = True
     return {
         "topic": topic,
         "payload": payload,
-        "retain": bool(obj.get("retain")),
+        "retain": retain,
         "tst": obj.get("tst"),
     }
 
@@ -201,10 +210,39 @@ def decide_reading(frame, gate, now_mono):
 
 def classify_db_error(exc):
     """Classify a database error as 'transient' (retry the batch) or 'row' (salvage row by row)."""
+    # A DBAPIError that invalidated the connection is transient even when its class name is not listed,
+    # e.g. a ProgrammingError raised because the connection dropped mid-statement.
+    if getattr(exc, "connection_invalidated", False):
+        return "transient"
     for cls in type(exc).__mro__:
         if cls.__name__ in TRANSIENT_DB_ERROR_NAMES:
             return "transient"
     return "row"
+
+
+def salvage_batch(rows, commit_one, rollback):
+    """Commit rows one at a time after a batch commit failed, classifying each row's outcome.
+
+    commit_one(row) commits a single row or raises; rollback() undoes a failed row.
+    Returns (committed, lost, remaining, status).
+    status is 'transient' when a row fails with a transient error: salvage stops, and remaining holds that row and the rest for a retry.
+    status is 'systematic' when nothing committed and there were rows: a systematic fault (e.g. a missing table) to surface, not to swallow.
+    status is 'ok' otherwise; a row that fails non-transiently is counted as lost.
+    """
+    committed = 0
+    lost = 0
+    for index, row in enumerate(rows):
+        try:
+            commit_one(row)
+            committed += 1
+        except Exception as exc:
+            rollback()
+            if classify_db_error(exc) == "transient":
+                return committed, lost, list(rows[index:]), "transient"
+            lost += 1
+    if committed == 0 and rows:
+        return committed, lost, [], "systematic"
+    return committed, lost, [], "ok"
 
 
 def next_monotonic_stamp(last_ts, sensor_id, now):

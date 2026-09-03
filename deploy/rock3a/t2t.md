@@ -14,9 +14,9 @@ Nothing is ever published to the broker, and no command reaches the bridge, inve
 
 | File | sha256 (short) | Role |
 |---|---|---|
-| `t2t_core.py` | `127ae561b166` | Pure, standard-library-only decision logic (framing, deny-list, staleness gate, line assembler, stamp, DB-error class). Unit-tested. |
-| `continuous_ingest.py` | `835b51a92b7f` | Thin shell: owns the app context + DB, runs the loop, imports `t2t_core`. Self-hashes at startup. |
-| `flexmeasures-ingest.sh` | `e37c786746b5` | Wrapper: waits for the container and broker, copies both modules in, runs the subscribe→ingest pipeline. |
+| `t2t_core.py` | `0d6efe4e10dd` | Pure, standard-library-only decision logic (framing, deny-list, staleness gate, line assembler, salvage, stamp, DB-error class). Unit-tested. |
+| `continuous_ingest.py` | `c884163cc0a0` | Thin shell: owns the app context + DB, runs the loop, imports `t2t_core`. Self-hashes at startup. |
+| `flexmeasures-ingest.sh` | `5f3bb843875c` | Wrapper: sets an empty XDG config, waits for the container and broker, copies both modules in, runs the subscribe→ingest pipeline. |
 | `flexmeasures-ingest.service` | `ae7e5e0a976f` | systemd **user** unit `flexmeasures-ingest.service`: `Restart=always`, start-limit disabled, ordered after the compose stack. |
 | `test_t2t_core.py` | — | Self-contained regression tests for `t2t_core` (`pytest deploy/rock3a/test_t2t_core.py`). |
 
@@ -29,6 +29,13 @@ logs its own hash on every start.
 - **JSON framing.** `mosquitto_sub -F '%j'` emits one JSON object per message (`topic`, `payload`,
   `retain`, `tst`); a newline inside a payload is escaped within the JSON string, so a payload can
   never be read as a second record and **forge a topic that slips past the deny-list**.
+  A missing or malformed `retain` flag fails closed (treated as retained, so it is skipped and can
+  never open the staleness gate).
+- **Config-independent subscriber.** `mosquitto_sub` auto-reads `$XDG_CONFIG_HOME/mosquitto_sub`
+  (else `~/.config/mosquitto_sub`), which could smuggle in `--remove-retained` (a PUBLISH),
+  `--will-topic`, or `--pretty` (breaking the one-JSON-per-line framing). The wrapper points
+  `XDG_CONFIG_HOME` at a controlled empty directory it owns, so no inherited config is ever read — the
+  subscribe-only and framing guarantees do not depend on the host's config.
 - **Deny-list (no exceptions).** `deye/battery/soc` and the whole `deye/bms/*` group are dropped
   before mapping, independent of what the DB binds (`skipped_forbidden`).
 - **Account-scoped map.** Only the account-1 sensors' `source_topic`s are mapped; a duplicate topic
@@ -37,10 +44,14 @@ logs its own hash on every start.
 - **Timestamp on arrival, monotonic across restarts.** `event_start = belief_time = arrival time`
   (UTC); the per-sensor stamp is seeded from the newest stored belief for the `mqtt-ingest` source,
   so a restart or a backward clock step cannot collide with a stored belief on the primary key.
-- **Batched commits, transient vs row.** Beliefs commit every ~200 lines or ~10 s. A deterministic
-  row error salvages the batch **row by row** (`commit_row_errors`); a transient DB/connection error
-  **keeps the batch** and, after a few backed-off retries, exits so systemd restarts it — a database
-  outage never triggers row-by-row deletion of good data.
+- **Batched commits, transient vs row vs systematic.** Beliefs commit every ~200 lines or ~10 s. A
+  deterministic row error salvages the batch **row by row** (`commit_row_errors`), and a row that
+  cannot be stored is counted as lost (`lost_beliefs`), never silently dropped. A transient
+  DB/connection error — including a DBAPIError whose connection was invalidated — **keeps the batch**
+  and, after a few backed-off retries, exits so systemd restarts it, so an outage never triggers
+  row-by-row deletion of good data. If a whole batch is rejected deterministically (a **systematic**
+  fault — a missing table or column, a permission error), the service **exits non-zero** instead of
+  clearing it and reporting success, so the fault surfaces at once rather than as silent loss.
 - **Circuit breaker.** One malformed line is contained, but after 100 *unexpected* per-line
   exceptions the service exits non-zero, so a systematic bug can't leave it "active" while rejecting
   every line.

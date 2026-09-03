@@ -168,33 +168,41 @@ def main():  # noqa: C901
                         flush=True,
                     )
                     return "transient"
-                # A deterministic row error: salvage the good rows one by one, but stop and retain the
-                # remainder if the database itself drops out mid-salvage, so a transient outage during
-                # salvage cannot delete the rows we have not tried yet.
+                # A deterministic batch error: salvage row by row via the pure helper, which stops and
+                # retains the remainder on a transient mid-salvage failure, counts non-transient row
+                # failures as lost, and flags a systematic fault (whole batch rejected) rather than
+                # clearing it silently.
                 print(
-                    f"[t2t] row error, salvaging batch of {len(batch)} row by row: {exc.__class__.__name__}",
+                    f"[t2t] batch error, salvaging {len(batch)} row by row: {exc.__class__.__name__}",
                     file=sys.stderr,
                     flush=True,
                 )
-                for index, belief in enumerate(batch):
-                    try:
-                        db.session.add(belief)
-                        db.session.commit()
-                        counters["committed"] += 1
-                    except SQLAlchemyError as row_exc:
-                        safe_rollback()
-                        if t2t_core.classify_db_error(row_exc) == "transient":
-                            del batch[
-                                :index
-                            ]  # drop the rows already committed, keep this one and the rest
-                            print(
-                                f"[t2t] DB dropped out during salvage; retaining {len(batch)} beliefs",
-                                file=sys.stderr,
-                                flush=True,
-                            )
-                            return "transient"
-                        counters["commit_row_errors"] += 1
-                batch.clear()
+
+                def _commit_one(belief):
+                    db.session.add(belief)
+                    db.session.commit()
+
+                committed, lost, remaining, status = t2t_core.salvage_batch(
+                    batch, _commit_one, safe_rollback
+                )
+                counters["committed"] += committed
+                counters["commit_row_errors"] += lost
+                counters["lost_beliefs"] += lost
+                batch[:] = remaining
+                if status == "transient":
+                    print(
+                        f"[t2t] DB dropped out during salvage; retaining {len(batch)} beliefs",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    return "transient"
+                if status == "systematic":
+                    print(
+                        f"[t2t] systematic DB error: whole batch of {lost} rejected",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    return "systematic"
                 return "ok"
 
         def heartbeat():
@@ -308,7 +316,8 @@ def main():  # noqa: C901
                     len(batch) >= BATCH_MAX_LINES
                     or now_mono - last_commit >= BATCH_MAX_SECONDS
                 ):
-                    if commit_batch() == "transient":
+                    result = commit_batch()
+                    if result == "transient":
                         transient_failures += 1
                         if transient_failures >= MAX_TRANSIENT_COMMIT_FAILURES:
                             print(
@@ -319,6 +328,14 @@ def main():  # noqa: C901
                             exit_code = 1
                             break
                         time.sleep(TRANSIENT_BACKOFF_SECONDS)
+                    elif result == "systematic":
+                        print(
+                            "[t2t] systematic DB error; exiting for a restart",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        exit_code = 1
+                        break
                     else:
                         transient_failures = 0
                         last_commit = now_mono
@@ -346,7 +363,11 @@ def main():  # noqa: C901
             # Best-effort final flush.
             # A DB outage here loses the in-flight batch (MQTT QoS 0 does not replay it), so report it
             # honestly and make the exit non-zero.
-            if commit_batch() == "transient" or batch:
+            if commit_batch() != "ok":
+                exit_code = 1
+            if (
+                batch
+            ):  # transient: rows were retained, but we are exiting, so they are lost
                 counters["lost_beliefs"] += len(batch)
                 print(
                     f"[t2t] exiting with {len(batch)} uncommitted beliefs lost (DB unavailable)",
