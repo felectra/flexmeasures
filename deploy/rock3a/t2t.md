@@ -16,7 +16,7 @@ Nothing is ever published to the broker, and no command reaches the bridge, inve
 |---|---|---|
 | `t2t_core.py` | `0d6efe4e10dd` | Pure, standard-library-only decision logic (framing, deny-list, staleness gate, line assembler, salvage, stamp, DB-error class). Unit-tested. |
 | `continuous_ingest.py` | `c884163cc0a0` | Thin shell: owns the app context + DB, runs the loop, imports `t2t_core`. Self-hashes at startup. |
-| `flexmeasures-ingest.sh` | `5f3bb843875c` | Wrapper: sets an empty XDG config, waits for the container and broker, copies both modules in, runs the subscribe→ingest pipeline. |
+| `flexmeasures-ingest.sh` | `ad5c2e61bb6d` | Wrapper: sets a private empty XDG config, waits for the container and broker, copies both modules in, runs the subscribe→ingest pipeline. |
 | `flexmeasures-ingest.service` | `ae7e5e0a976f` | systemd **user** unit `flexmeasures-ingest.service`: `Restart=always`, start-limit disabled, ordered after the compose stack. |
 | `test_t2t_core.py` | — | Self-contained regression tests for `t2t_core` (`pytest deploy/rock3a/test_t2t_core.py`). |
 
@@ -34,8 +34,10 @@ logs its own hash on every start.
 - **Config-independent subscriber.** `mosquitto_sub` auto-reads `$XDG_CONFIG_HOME/mosquitto_sub`
   (else `~/.config/mosquitto_sub`), which could smuggle in `--remove-retained` (a PUBLISH),
   `--will-topic`, or `--pretty` (breaking the one-JSON-per-line framing). The wrapper points
-  `XDG_CONFIG_HOME` at a controlled empty directory it owns, so no inherited config is ever read — the
-  subscribe-only and framing guarantees do not depend on the host's config.
+  `XDG_CONFIG_HOME` at a private, user-owned directory — the per-user runtime dir (mode 0700, tmpfs),
+  else one under `$HOME`, never `/tmp` and never `~/.config` — locks its mode to 0700, and removes any
+  stray `mosquitto_sub` file in it, so no inherited config is ever read and the subscribe-only and
+  framing guarantees do not depend on the host's config.
 - **Deny-list (no exceptions).** `deye/battery/soc` and the whole `deye/bms/*` group are dropped
   before mapping, independent of what the DB binds (`skipped_forbidden`).
 - **Account-scoped map.** Only the account-1 sensors' `source_topic`s are mapped; a duplicate topic

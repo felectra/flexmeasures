@@ -15,11 +15,16 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Make the subscriber config-independent. mosquitto_sub auto-reads $XDG_CONFIG_HOME/mosquitto_sub
 # (else ~/.config/mosquitto_sub), and such a file could carry --remove-retained (which PUBLISHES),
 # --will-topic, or --pretty/-N (which breaks the one-JSON-per-line framing). Point XDG_CONFIG_HOME at a
-# controlled empty directory we own, so no inherited user config is ever read — the subscribe-only and
-# framing guarantees must not depend on the host's config. A fixed per-service dir avoids leaking a new
-# mktemp dir on every restart, and we do not use $HOME/.config.
-XDG_EMPTY="${XDG_RUNTIME_DIR:-/tmp}/flexmeasures-ingest-xdg"
+# private, user-owned directory so no inherited config is ever read — the subscribe-only and framing
+# guarantees must not depend on the host's config.
+# Prefer the per-user runtime dir (mode 0700, on tmpfs, only this user); otherwise a user-owned dir
+# under $HOME. Never /tmp (world-writable and predictable, so another user could pre-create it or a
+# symlink), and never $HOME/.config (mosquitto_sub's default location). Lock the mode to 0700 and
+# remove any stray or symlinked `mosquitto_sub` file, so mosquitto_sub can read no config from here.
+XDG_EMPTY="${XDG_RUNTIME_DIR:-$HOME/.local/state}/flexmeasures-ingest-xdg"
 mkdir -p "$XDG_EMPTY"
+chmod 700 "$XDG_EMPTY"
+rm -f "$XDG_EMPTY/mosquitto_sub"
 export XDG_CONFIG_HOME="$XDG_EMPTY"
 
 # The compose service is oneshot (RemainAfterExit), so it "completes" while containers are still

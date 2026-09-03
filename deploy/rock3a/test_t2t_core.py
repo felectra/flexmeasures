@@ -290,6 +290,7 @@ def test_parse_frame_retain_fail_closed():
     assert retain_of(None) is True  # fail closed
     assert retain_of(2) is True  # fail closed
     assert retain_of("1") is True  # fail closed
+    assert retain_of(1.0) is True  # a float fails closed
     # A missing retain key also fails closed.
     assert (
         t2t_core.parse_frame(json.dumps({"topic": "t", "payload": "1"}))["retain"]
