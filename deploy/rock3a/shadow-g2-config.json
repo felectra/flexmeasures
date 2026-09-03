@@ -6,7 +6,7 @@
   "solver": "highspy",
   "min_input_coverage": 0.9,
   "expected_inflexible_sensor_ids": [7],
-  "target_output_sensor_id": null,
+  "target_output_sensor_id": 45,
   "scheduling_sensor_id_for_validation": 17,
   "battery": {
     "capacity_kwh": 18.0,
@@ -33,6 +33,6 @@
     "prices": "Flat 50 EUR/MWh consumption=production is an internal nudge, not a tariff; the round-trip loss keeps the battery idle unless the peak price forces action.",
     "peak": "site-peak-consumption 0.3 kW baseline and 120 EUR/MW price are an internal peak-shaving nudge, not a measured or contracted limit.",
     "grid_signal": "deye/ac/total_grid_power already nets the battery (behind-the-meter), so wiring it as the inflexible load makes this a SHADOW illustration, not a true dispatch.",
-    "prerequisite": "A meaningful 24h run needs CONTINUOUS ingestion of the inflexible sensor; the labems-3oh bridge is one-shot, so min_input_coverage gates --commit against schedules dominated by invented zeros (see shadow-g2.md)."
+    "prerequisite": "A meaningful 24h run needs CONTINUOUS ingestion of the inflexible sensor; this is now provided by the labems-t2t service (the labems-3oh bridge was one-shot), so coverage is ~1.0, and min_input_coverage still gates --commit against any future gap (see shadow-g2.md)."
   }
 }
