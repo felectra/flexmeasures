@@ -1,0 +1,28 @@
+[Unit]
+Description=Continuous MQTT -> FlexMeasures ingestion (labems-t2t)
+Documentation=file:%h/flexmeasures/deploy/rock3a/t2t.md
+Wants=network-online.target
+After=network-online.target
+# Start after the rootless compose stack that runs the FM server container.
+# The wrapper still waits for rock3a_server_1 to be running, since the compose unit is oneshot.
+Wants=flexmeasures-pilot.service
+After=flexmeasures-pilot.service
+# The hlj startup guard can hold the broker down for ~60-90 s after a reboot, so the pipeline may
+# exit and restart several times before it connects. Disable the start rate limit so those expected
+# restarts never trip systemd's default 5-in-10 s limit and permanently fail the unit.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=%h/flexmeasures/deploy/rock3a
+ExecStart=%h/flexmeasures/deploy/rock3a/flexmeasures-ingest.sh
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+# Logs to the user journal; rotation is journald's (see t2t.md).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fm-ingest
+
+[Install]
+WantedBy=default.target
