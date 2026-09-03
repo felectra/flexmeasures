@@ -316,3 +316,26 @@ def test_retain_null_data_age_does_not_open_gate():
     assert (
         gate.is_stale("jkbms/string_a", 0.0) is False
     )  # a valid live data_age then opens it
+
+
+# --- heartbeat logger: writes a readable file and rotates, without duplicate handlers ---
+
+
+def test_heartbeat_logger_writes_and_rotates(tmp_path):
+    path = str(tmp_path / "hb.log")
+    logger, listener = t2t_core.make_heartbeat_logger(
+        path=path, max_bytes=200, backups=2
+    )
+    try:
+        for i in range(50):
+            logger.info(f"[t2t] hb line {i} " + "x" * 40)
+    finally:
+        listener.stop()  # drain the queue and flush before asserting.
+    assert os.path.exists(path)  # the primary file is present.
+    assert "[t2t] hb line" in open(path).read()
+    assert os.path.exists(path + ".1")  # the small max_bytes forced a rotation.
+    logger2, listener2 = t2t_core.make_heartbeat_logger(
+        path=path, max_bytes=200, backups=2
+    )
+    listener2.stop()
+    assert len(logger2.handlers) == 1  # re-creating must not stack duplicate handlers.

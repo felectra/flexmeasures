@@ -14,11 +14,12 @@ Nothing is ever published to the broker, and no command reaches the bridge, inve
 
 | File | sha256 (short) | Role |
 |---|---|---|
-| `t2t_core.py` | `0d6efe4e10dd` | Pure, standard-library-only decision logic (framing, deny-list, staleness gate, line assembler, salvage, stamp, DB-error class). Unit-tested. |
-| `continuous_ingest.py` | `c884163cc0a0` | Thin shell: owns the app context + DB, runs the loop, imports `t2t_core`. Self-hashes at startup. |
+| `t2t_core.py` | `416a08b58d93` | Pure, standard-library-only decision logic (framing, deny-list, staleness gate, line assembler, salvage, stamp, DB-error class, heartbeat logger). Unit-tested. |
+| `continuous_ingest.py` | `af365b1ec533` | Thin shell: owns the app context + DB, runs the loop, imports `t2t_core`. Self-hashes at startup. |
 | `flexmeasures-ingest.sh` | `ad5c2e61bb6d` | Wrapper: sets a private empty XDG config, waits for the container and broker, copies both modules in, runs the subscribe→ingest pipeline. |
 | `flexmeasures-ingest.service` | `ae7e5e0a976f` | systemd **user** unit `flexmeasures-ingest.service`: `Restart=always`, start-limit disabled, ordered after the compose stack. |
 | `test_t2t_core.py` | — | Self-contained regression tests for `t2t_core` (`pytest deploy/rock3a/test_t2t_core.py`). |
+| `retention.md` | — | Belief-growth numbers, proposed retention policy, and a ready (unscheduled) prune tool. |
 
 Authoritative hashes: `sha256sum deploy/rock3a/t2t_core.py deploy/rock3a/continuous_ingest.py
 deploy/rock3a/flexmeasures-ingest.sh deploy/rock3a/flexmeasures-ingest.service`; the ingester also
@@ -125,24 +126,29 @@ Steady-state operation (database healthy) loses nothing.
 
 ## Belief-storage growth — a known risk (owner decision)
 
-At the bench cadence (deye ~1/60 s × 18 sensors, jkbms ~1/10–13 s × 20 sensors) the service writes
-roughly **179 k beliefs/day ≈ 5.4 M/month**, order **~1 GB/month** including indexes, on the board's
-**14.5 GB eMMC** (already partly used by the stack and the DB).
-That is fine for the ≥24 h sc9 run and near-term work, but **unbounded growth will fill the eMMC in a
-few months**.
-Downsampling / retention is **not implemented here** (out of scope for build-only and unnecessary for
-sc9); it should be an **owner decision and a likely follow-up bead** — e.g. a retention window on raw
-beliefs, periodic downsampling to a coarser resolution, or moving the DB volume to larger storage.
+Measured at the bench cadence, the service writes roughly **6631 beliefs/hour ≈ 159 k/day**, about
+**42 MB/day** (a `timed_belief` row is ~272 B including indexes), on the board's **14.5 GB eMMC**.
+With ~3.5 GB free, that is roughly a **2.7-month runway** before the disk fills.
+That is fine for the ≥24 h sc9 run and near-term work, but a retention policy is needed before then.
+The measured numbers, the runway, and a ready (unscheduled) prune tool live in
+[`retention.md`](retention.md); scheduling it is an owner / YellowHeron decision and a separate bead.
 
 ## Logging and rotation
 
-Logs go to the **user journal** (`SyslogIdentifier=fm-ingest`; the unit is
-`flexmeasures-ingest.service`).
-Read them by unit — `journalctl --user -u flexmeasures-ingest` (add `-f`) — or by identifier,
-`journalctl --user -t fm-ingest`.
-Rotation is journald's; the volume is tiny (~1 heartbeat line/minute).
-On the small eMMC, bound the journal by setting `SystemMaxUse=` (e.g. `200M`) in
-`/etc/systemd/journald.conf` (a one-time host change the owner makes).
+The startup line, each heartbeat, and every notice go to **stderr** and **also** to a small
+**rotating file inside the container** at `/tmp/t2t-heartbeat.log` (256 KB × 2 backups, flushed per
+record).
+The file sink exists because `podman exec` buffers the stderr it relays, so
+`journalctl --user -u flexmeasures-ingest` stays empty for the running instance — the file is the way
+to watch the live heartbeat:
+
+    podman exec rock3a_server_1 cat /tmp/t2t-heartbeat.log
+
+The file is ephemeral per container start (in the container's `/tmp`), which is fine for a live health
+view, and it appears only from the **next t2t (re)start** onward.
+The unit still sets `SyslogIdentifier=fm-ingest`; if a future FlexMeasures/podman change unbuffers the
+relayed stderr, `journalctl --user -u flexmeasures-ingest` (or `-t fm-ingest`) shows the same lines.
+The journal is bounded on the small eMMC via `SystemMaxUse=` (already set by the owner at `20M`).
 
 ## Apply steps — RUN LATER, not executed here
 
@@ -242,12 +248,12 @@ Fail-first was verified by breaking the elapsed-expiry line, which turns
 
 ## Open decisions for YellowHeron / owner
 
-- **Belief retention / downsampling** (above) — the main follow-up: unbounded growth fills the 14.5 GB
-  eMMC in a few months.
+- **Belief retention / downsampling** — the main follow-up: ~2.7-month runway before the eMMC fills.
+  Policy and a ready (unscheduled) prune tool are in [`retention.md`](retention.md); scheduling it is
+  the decision.
 - **Quadlet vs user unit** — a plain user unit is used (matches `flexmeasures-pilot.service`, no new
   tooling); a Quadlet adds no benefit, since the ingester runs *inside* the existing server container.
 - **Script delivery** — the wrapper `podman cp`s both modules in at each start (idempotent, no image
   change, freeze-safe); a future refinement could mount `deploy/rock3a` via the compose file, but that
   needs a container recreation.
-- **Journal cap** — setting `SystemMaxUse=` is a one-time host change to make alongside enabling the
-  service.
+- **Journal cap** — done: the owner set `SystemMaxUse=20M`.

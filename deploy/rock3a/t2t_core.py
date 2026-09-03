@@ -5,8 +5,11 @@ continuous_ingest.py imports this module for every decision that does not touch 
 """
 
 import json
+import logging
 import math
+import queue
 from datetime import timedelta
+from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 
 # Sources that must never be ingested, enforced independently of what the DB happens to bind:
 # the inverter SOC estimate is wrong (reads full at ~1/3 charge), and the deye/bms/* group is all zeros.
@@ -19,6 +22,11 @@ STALE_AGE_SECONDS = 60.0
 STALE_OBSERVATION_HORIZON_SECONDS = 90.0
 # A single record longer than this is dropped, so a broken stream cannot exhaust memory on the board.
 MAX_LINE_BYTES = 1_000_000
+# A small rotating file inside the container mirrors the stderr heartbeat.
+# podman exec buffers the relayed stderr and leaves journalctl empty for the running instance.
+HEARTBEAT_LOG_PATH = "/tmp/t2t-heartbeat.log"
+HEARTBEAT_LOG_MAX_BYTES = 256 * 1024
+HEARTBEAT_LOG_BACKUPS = 2
 
 # SQLAlchemy error class names that mean the database or connection is at fault, so the whole batch
 # should be retried rather than salvaged row by row.
@@ -256,3 +264,32 @@ def next_monotonic_stamp(last_ts, sensor_id, now):
         now = earliest + timedelta(microseconds=1)
     last_ts[sensor_id] = now
     return now
+
+
+def make_heartbeat_logger(
+    path=HEARTBEAT_LOG_PATH,
+    max_bytes=HEARTBEAT_LOG_MAX_BYTES,
+    backups=HEARTBEAT_LOG_BACKUPS,
+):
+    """Return (logger, listener) for a non-blocking rotating-file heartbeat sink.
+
+    Records go through a QueueHandler onto an in-memory queue, and a background QueueListener thread does the file I/O,
+    so a slow or blocked disk write can never stall the caller.
+    This is a secondary sink alongside the stderr prints, so the heartbeat and notices are readable live inside the container,
+    even though `podman exec` buffers the relayed stderr.
+    It changes nothing about ingestion; it only mirrors the messages.
+    """
+    # Never let logging raise or print its own diagnostics into the ingester's stderr.
+    logging.raiseExceptions = False
+    file_handler = RotatingFileHandler(path, maxBytes=max_bytes, backupCount=backups)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    log_queue = queue.Queue(-1)
+    listener = QueueListener(log_queue, file_handler, respect_handler_level=False)
+    listener.start()  # QueueListener runs its monitor thread as a daemon.
+    logger = logging.getLogger("t2t-heartbeat")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    for existing in list(logger.handlers):
+        logger.removeHandler(existing)
+    logger.addHandler(QueueHandler(log_queue))
+    return logger, listener

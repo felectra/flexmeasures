@@ -12,7 +12,7 @@ It keeps the labems-3oh guards (deny-list, math.isfinite, per-sensor monotonic a
 - Batched commits with a transient-vs-row policy: a poisoned row is salvaged row by row, while a database outage keeps the batch and exits so systemd retries.
 - Circuit breakers: it exits non-zero after a storm of unexpected exceptions, or when lines keep flowing but nothing commits, so it never stays "active" while rejecting everything.
 
-A periodic stderr heartbeat prints the running counters, so `journalctl` shows the flow is healthy.
+The startup line, each heartbeat, and every notice go to stderr and also to a small rotating file inside the container (t2t_core.HEARTBEAT_LOG_PATH), which is readable live via `podman exec rock3a_server_1 cat /tmp/t2t-heartbeat.log` even though `podman exec` buffers the relayed stderr.
 `committed` is the durable count; `ingested` counts messages accepted for writing before the commit lands.
 
 Run inside the server container, fed by a host-side subscriber (see flexmeasures-ingest.sh):
@@ -53,6 +53,21 @@ def main():  # noqa: C901
     except OSError:
         pass
 
+    # A secondary sink for the startup line, heartbeats, and notices: a rotating file in the container,
+    # readable live despite podman-exec stderr buffering. A logging failure must never affect ingestion.
+    try:
+        hb_logger, hb_listener = t2t_core.make_heartbeat_logger()
+    except OSError:
+        hb_logger, hb_listener = None, None
+
+    def emit(message):
+        print(message, file=sys.stderr, flush=True)
+        if hb_logger is not None:
+            try:
+                hb_logger.info(message)
+            except Exception:
+                pass
+
     app = create_app()
     with app.app_context():
         from sqlalchemy import text
@@ -88,10 +103,8 @@ def main():  # noqa: C901
             if topic in topic_to_sensor or topic in ambiguous:
                 ambiguous.add(topic)
                 topic_to_sensor.pop(topic, None)
-                print(
-                    f"[t2t] ambiguous source_topic {topic!r} on more than one account-1 sensor; dropping it entirely",
-                    file=sys.stderr,
-                    flush=True,
+                emit(
+                    f"[t2t] ambiguous source_topic {topic!r} on more than one account-1 sensor; dropping it entirely"
                 )
                 continue
             topic_to_sensor[topic] = sensor
@@ -162,20 +175,16 @@ def main():  # noqa: C901
                 safe_rollback()
                 counters["commit_errors"] += 1
                 if t2t_core.classify_db_error(exc) == "transient":
-                    print(
-                        f"[t2t] transient DB error, retaining {len(batch)} beliefs: {exc.__class__.__name__}",
-                        file=sys.stderr,
-                        flush=True,
+                    emit(
+                        f"[t2t] transient DB error, retaining {len(batch)} beliefs: {exc.__class__.__name__}"
                     )
                     return "transient"
                 # A deterministic batch error: salvage row by row via the pure helper, which stops and
                 # retains the remainder on a transient mid-salvage failure, counts non-transient row
                 # failures as lost, and flags a systematic fault (whole batch rejected) rather than
                 # clearing it silently.
-                print(
-                    f"[t2t] batch error, salvaging {len(batch)} row by row: {exc.__class__.__name__}",
-                    file=sys.stderr,
-                    flush=True,
+                emit(
+                    f"[t2t] batch error, salvaging {len(batch)} row by row: {exc.__class__.__name__}"
                 )
 
                 def _commit_one(belief):
@@ -190,29 +199,19 @@ def main():  # noqa: C901
                 counters["lost_beliefs"] += lost
                 batch[:] = remaining
                 if status == "transient":
-                    print(
-                        f"[t2t] DB dropped out during salvage; retaining {len(batch)} beliefs",
-                        file=sys.stderr,
-                        flush=True,
+                    emit(
+                        f"[t2t] DB dropped out during salvage; retaining {len(batch)} beliefs"
                     )
                     return "transient"
                 if status == "systematic":
-                    print(
-                        f"[t2t] systematic DB error: whole batch of {lost} rejected",
-                        file=sys.stderr,
-                        flush=True,
-                    )
+                    emit(f"[t2t] systematic DB error: whole batch of {lost} rejected")
                     return "systematic"
                 return "ok"
 
         def heartbeat():
             up = int(time.monotonic() - start_mono)
             fields = " ".join(f"{k}={v}" for k, v in counters.items())
-            print(
-                f"[t2t] hb {fields} pending={len(batch)} uptime_s={up}",
-                file=sys.stderr,
-                flush=True,
-            )
+            emit(f"[t2t] hb {fields} pending={len(batch)} uptime_s={up}")
 
         def handle_line(raw):
             frame = t2t_core.parse_frame(raw)
@@ -260,10 +259,8 @@ def main():  # noqa: C901
         transient_failures = 0
         exit_code = 0
         stdin_fd = sys.stdin.fileno()
-        print(
-            f"[t2t] started sha256={self_sha[:12]} source_id={source.id} mapped_topics={len(topic_to_sensor)}",
-            file=sys.stderr,
-            flush=True,
+        emit(
+            f"[t2t] started sha256={self_sha[:12]} source_id={source.id} mapped_topics={len(topic_to_sensor)}"
         )
         try:
             while True:
@@ -289,19 +286,15 @@ def main():  # noqa: C901
                             Exception
                         ) as exc:  # contain one bad line, but trip the breaker on a storm
                             counters["unexpected_errors"] += 1
-                            print(
-                                f"[t2t] unexpected line error: {exc.__class__.__name__}: {exc}",
-                                file=sys.stderr,
-                                flush=True,
+                            emit(
+                                f"[t2t] unexpected line error: {exc.__class__.__name__}: {exc}"
                             )
                             if (
                                 counters["unexpected_errors"]
                                 >= MAX_UNEXPECTED_LINE_ERRORS
                             ):
-                                print(
-                                    "[t2t] too many unexpected errors; exiting for a restart",
-                                    file=sys.stderr,
-                                    flush=True,
+                                emit(
+                                    "[t2t] too many unexpected errors; exiting for a restart"
                                 )
                                 exit_code = 1
                                 raise SystemExit(exit_code)
@@ -320,20 +313,12 @@ def main():  # noqa: C901
                     if result == "transient":
                         transient_failures += 1
                         if transient_failures >= MAX_TRANSIENT_COMMIT_FAILURES:
-                            print(
-                                "[t2t] database unavailable; exiting for a restart",
-                                file=sys.stderr,
-                                flush=True,
-                            )
+                            emit("[t2t] database unavailable; exiting for a restart")
                             exit_code = 1
                             break
                         time.sleep(TRANSIENT_BACKOFF_SECONDS)
                     elif result == "systematic":
-                        print(
-                            "[t2t] systematic DB error; exiting for a restart",
-                            file=sys.stderr,
-                            flush=True,
-                        )
+                        emit("[t2t] systematic DB error; exiting for a restart")
                         exit_code = 1
                         break
                     else:
@@ -352,10 +337,8 @@ def main():  # noqa: C901
                     heartbeat()
                     last_heartbeat = now_mono
                     if zero_commit_heartbeats >= MAX_ZERO_COMMIT_HEARTBEATS:
-                        print(
-                            "[t2t] records flowing but nothing committed; exiting for a restart",
-                            file=sys.stderr,
-                            flush=True,
+                        emit(
+                            "[t2t] records flowing but nothing committed; exiting for a restart"
                         )
                         exit_code = 1
                         break
@@ -369,14 +352,18 @@ def main():  # noqa: C901
                 batch
             ):  # transient: rows were retained, but we are exiting, so they are lost
                 counters["lost_beliefs"] += len(batch)
-                print(
-                    f"[t2t] exiting with {len(batch)} uncommitted beliefs lost (DB unavailable)",
-                    file=sys.stderr,
-                    flush=True,
+                emit(
+                    f"[t2t] exiting with {len(batch)} uncommitted beliefs lost (DB unavailable)"
                 )
                 batch.clear()
                 exit_code = 1
             heartbeat()
+            if hb_listener is not None:
+                # Drain and flush the heartbeat file, then stop the background writer thread.
+                try:
+                    hb_listener.stop()
+                except Exception:
+                    pass
         raise SystemExit(exit_code)
 
 
