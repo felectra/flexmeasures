@@ -12,6 +12,9 @@
     --amber:#c07d15; --amber-soft:#f6e7c9;
     --charge:#12925f; --discharge:#c9701a; --neutral:#9fb3ad;
     --shadow:0 1px 2px rgba(19,35,33,.05),0 10px 34px rgba(19,35,33,.07);
+    /* Гер — фіксована темна брендова панель у ОБОХ темах: ці токени навмисно не перекидаються,
+       інакше в темній теми teal стає яскравим і білий текст зникає. */
+    --hero-a:#0b4742; --hero-b:#0f5f59;
   }
   @media (prefers-color-scheme:dark){
     :root:not([data-theme="light"]){
@@ -56,7 +59,7 @@
   .em-green{color:var(--green);font-weight:600}
   .lede{font-size:clamp(1.05rem,1rem + .5vw,1.22rem);color:var(--muted);max-width:60ch}
 
-  .hero{background:linear-gradient(160deg,var(--teal-2),var(--teal));color:#f2fbf8;
+  .hero{background:linear-gradient(160deg,var(--hero-a),var(--hero-b));color:#f2fbf8;
     border-radius:20px;padding:clamp(26px,5vw,48px);box-shadow:var(--shadow);margin-bottom:22px}
   .hero .eyebrow{color:#8fe6d6}
   .hero h1{font-size:clamp(1.9rem,1.3rem + 3vw,3rem);color:#fff}
