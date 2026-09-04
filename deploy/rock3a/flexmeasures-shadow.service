@@ -1,0 +1,17 @@
+[Unit]
+Description=labems-sc9 shadow peak-shaving cycle (one run)
+Documentation=file:%h/flexmeasures/deploy/rock3a/shadow-g2.md
+# Run after the container stack and the ingestion service; the wrapper still waits for the server
+# container, since the compose unit is oneshot.
+Wants=flexmeasures-pilot.service
+After=flexmeasures-pilot.service flexmeasures-ingest.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/flexmeasures/deploy/rock3a
+ExecStart=%h/flexmeasures/deploy/rock3a/flexmeasures-shadow.sh
+# The cycle writes only the FM DB; a failed run (reproducibility or coverage gate) is logged, and the
+# timer simply runs again next interval.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fm-shadow

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the labems-sc9 shadow peak-shaving cycle every 15 minutes
+
+[Timer]
+# Every quarter hour, aligned to the PT15M schedule resolution; catch up one missed run after downtime.
+OnCalendar=*:00/15
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
