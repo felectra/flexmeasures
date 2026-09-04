@@ -136,12 +136,24 @@ podman exec -i rock3a_server_1 python /tmp/shadow_schedule.py \
 FlexMeasures reads only beliefs known as of `belief_time`, and the window is captured once, so the two
 computes read the same inputs and the deterministic HiGHS solver returns an identical schedule.
 
+## Bucketing the instantaneous inputs
+
+The grid (7) and battery (17) sensors are `event_resolution = 0` (instantaneous), and FlexMeasures'
+resolution-resample returns **nothing** for a 0-resolution sensor.
+So the tool fetches the raw beliefs (pinned to the `mqtt-ingest` source, one deterministic belief per
+event) and buckets them into PT15M slots in Python, taking the **mean power** per slot — the natural
+kW-over-a-slot value.
+`P_load` is then the intersection of the grid and battery slot means.
+
 ## Coverage gate
 
-`input_coverage` is the fraction of window slots for which the site-load sensor has a real belief.
+`input_coverage` is **slot occupancy**: the fraction of window slots that carry at least one bucketed
+sample (not sampling density).
 Below `min_input_coverage` (0.9) the run is `insufficient_input` and `--commit` is refused.
-With continuous t2t ingestion the retrospective window is fully covered (~1.0), so the gate passes;
-it still guards against a future gap.
+Because a small **recent** outage could stay under that threshold, a separate `stale_tail` guard also
+refuses `--commit` when the newest derived slot is older than `end − 2·resolution`.
+With continuous t2t ingestion the retrospective window is fully covered (~1.0) and the tail is fresh,
+so both gates pass.
 
 ## Open items for YellowHeron / owner
 

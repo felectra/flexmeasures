@@ -134,6 +134,42 @@ def test_coverage_full_when_window_covered():
     assert sc9_core.coverage_fraction(slots, END, RES, 4) == 1.0
 
 
+# --- bucketing raw instantaneous beliefs into slots (the 0-resolution-sensor fix) ---
+
+
+def test_bucket_mean_by_slot_averages_within_slot():
+    pairs = [
+        (END, 1.0),
+        (END + timedelta(minutes=5), 3.0),  # same slot as END -> mean(1, 3) = 2
+        (END + RES, 10.0),  # next slot
+    ]
+    out = sc9_core.bucket_mean_by_slot(pairs, END, RES, 4)
+    assert out[END] == 2.0
+    assert out[END + RES] == 10.0
+
+
+def test_bucket_mean_by_slot_excludes_out_of_range():
+    pairs = [(END - RES, 1.0), (END + 10 * RES, 2.0), (END, 5.0)]
+    out = sc9_core.bucket_mean_by_slot(pairs, END, RES, 4)
+    assert list(out) == [END]  # before-start and beyond expected_steps are excluded
+
+
+def test_bucket_mean_by_slot_empty_input():
+    assert sc9_core.bucket_mean_by_slot([], END, RES, 4) == {}
+
+
+def test_bucket_mean_by_slot_excludes_sample_exactly_at_end():
+    # A sample at index == expected_steps (exactly at end) is dropped — half-open [start, end).
+    out = sc9_core.bucket_mean_by_slot([(END, 1.0), (END + 4 * RES, 9.0)], END, RES, 4)
+    assert END in out and (END + 4 * RES) not in out
+
+
+def test_bucket_mean_by_slot_order_independent():
+    a = sc9_core.bucket_mean_by_slot([(END, 1.0), (END, 3.0)], END, RES, 1)
+    b = sc9_core.bucket_mean_by_slot([(END, 3.0), (END, 1.0)], END, RES, 1)
+    assert a == b == {END: 2.0}
+
+
 def test_check_reproducible_uses_actual_expected_steps():
     recs = [{"event_start": "t", "value": 1.0}]
     ok, _ = sc9_core.check_reproducible(recs, recs, 1)  # actual window steps

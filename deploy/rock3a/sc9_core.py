@@ -146,6 +146,25 @@ def peak_metrics(grid_by_slot, load_by_slot, batt_sched_discharge_by_slot):
     }
 
 
+def bucket_mean_by_slot(pairs, start, resolution, expected_steps):
+    """Bucket instantaneous (event_start_utc, value) pairs into resolution slots, averaging within each slot.
+
+    The measured sensors are event_resolution = 0, so FlexMeasures' resolution-resample returns nothing;
+    we bucket the raw beliefs here instead — the mean power over a slot is the natural kW-over-a-slot value.
+    Each pair goes to slot index floor((event_start - start) / resolution); only slots in [0, expected_steps) are kept, so a sample exactly at end (index == expected_steps) is dropped, matching the schedule's half-open [start, end) slots.
+    Returns {slot_start_datetime: mean(values)} as sum/count, deterministic for a given input (order-independent to floating-point tolerance for real telemetry values).
+    NaN values must already be excluded by the caller.
+    """
+    step = resolution.total_seconds()
+    sums, counts = {}, {}
+    for ev, value in pairs:
+        idx = int((ev - start).total_seconds() // step)
+        if 0 <= idx < expected_steps:
+            sums[idx] = sums.get(idx, 0.0) + value
+            counts[idx] = counts.get(idx, 0) + 1
+    return {start + idx * resolution: sums[idx] / counts[idx] for idx in sums}
+
+
 def covered_slots(event_starts, start, resolution, expected_steps):
     """Return the set of window slot indices covered by the given event_starts."""
     step = resolution.total_seconds()

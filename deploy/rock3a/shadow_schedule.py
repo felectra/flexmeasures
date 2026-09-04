@@ -54,29 +54,37 @@ def _to_utc(dt):
     return dt.astimezone(timezone.utc)
 
 
-def resample_by_slot(sensor, start, end, belief_time, resolution, scale=1.0):
-    """Return {utc_slot_start: value * scale} for the sensor over [start, end] as of belief_time.
+def resample_by_slot(
+    sensor, start, end, belief_time, resolution, scale=1.0, source=None
+):
+    """Return {utc_slot_start: mean(value * scale)} for the sensor over [start, end) as of belief_time.
 
-    One deterministic belief per slot, resampled to resolution; NaN slots are dropped.
+    The grid and battery sensors are event_resolution = 0 (instantaneous), and FlexMeasures'
+    resolution-resample returns nothing for a 0-resolution sensor, so we fetch the RAW beliefs (no
+    coarser resolution) and bucket them into resolution slots in Python (mean power per slot).
+    one_deterministic_belief_per_event keeps one value per event, and pinning source (the mqtt-ingest
+    DataSource for the measured inputs) avoids double-counting a same-event belief from another source.
+    NaN values are dropped and the W->kW scale is applied before bucketing.
     """
     from flexmeasures.data.models.time_series import TimedBelief
 
-    out = {}
     bdf = TimedBelief.search(
         sensors=sensor,
         event_starts_after=start,
         event_ends_before=end,
         beliefs_before=belief_time,
-        resolution=resolution,
+        source=source,
         one_deterministic_belief_per_event=True,
     )
+    pairs = []
     if len(bdf):
         df = bdf.reset_index()
         for _, row in df.iterrows():
             val = row["event_value"]
             if val == val:  # not NaN
-                out[_to_utc(row["event_start"])] = float(val) * scale
-    return out
+                pairs.append((_to_utc(row["event_start"]), float(val) * scale))
+    expected_steps = int((end - start).total_seconds() // resolution.total_seconds())
+    return sc9_core.bucket_mean_by_slot(pairs, start, resolution, expected_steps)
 
 
 def get_or_create_source(db, DataSource, name, type_):
@@ -114,10 +122,12 @@ def asset_flex_context_chain(sensor):
 
 
 def coverage_over_window(sensor, start, end, belief_time, resolution, expected_steps):
-    """Fraction of window slots for which the sensor has a real belief (the scheduler zero-fills the rest)."""
+    """Fraction of window slots for which the sensor has a real belief (the scheduler zero-fills the rest).
+
+    The bucketed dict already holds only the slots that carry data, within [0, expected_steps).
+    """
     slots = resample_by_slot(sensor, start, end, belief_time, resolution)
-    covered = sc9_core.covered_slots(list(slots), start, resolution, expected_steps)
-    return len(covered) / expected_steps if expected_steps else 0.0
+    return len(slots) / expected_steps if expected_steps else 0.0
 
 
 def compute_schedule_series(
@@ -307,11 +317,23 @@ def main():  # noqa: C901
                 f"grid/battery unit not W (got {grid_sensor.unit!r}/{batt_sensor.unit!r}); the W->kW scale would be wrong."
             )
 
+        # Pin the measured inputs to the mqtt-ingest source, so no other source double-counts an event.
+        mqtt_source = (
+            db.session.query(DataSource)
+            .filter_by(name="mqtt-ingest", type="mqtt")
+            .first()
+        )
+
         end = sc9_core.floor_to(now, resolution)
         earliest = None
         if window_mode == "retrospective" and start_override is None:
             grid_lookback = resample_by_slot(
-                grid_sensor, end - horizon, end, belief_time, resolution
+                grid_sensor,
+                end - horizon,
+                end,
+                belief_time,
+                resolution,
+                source=mqtt_source,
             )
             earliest = sc9_core.continuous_run_start(
                 list(grid_lookback), end, resolution
@@ -336,12 +358,29 @@ def main():  # noqa: C901
 
         # Derive the real site load (kW) from grid (import +) and battery (discharge +), both in W.
         grid_by_slot = resample_by_slot(
-            grid_sensor, start, end, belief_time, resolution, scale=0.001
+            grid_sensor,
+            start,
+            end,
+            belief_time,
+            resolution,
+            scale=0.001,
+            source=mqtt_source,
         )
         batt_by_slot = resample_by_slot(
-            batt_sensor, start, end, belief_time, resolution, scale=0.001
+            batt_sensor,
+            start,
+            end,
+            belief_time,
+            resolution,
+            scale=0.001,
+            source=mqtt_source,
         )
         p_load = sc9_core.derive_site_load(grid_by_slot, batt_by_slot)
+
+        # A stale tail (a recent outage below the coverage threshold) must not slip a commit through:
+        # require the newest derived slot to be within two resolutions of the window end.
+        newest_slot = max(p_load) if p_load else None
+        stale_tail = newest_slot is None or newest_slot < end - 2 * resolution
 
         # Write the derived load onto the site-load sensor within the session, so the scheduler reads it;
         # flush makes it visible in-session. It is committed only under --commit, else rolled back.
@@ -407,6 +446,8 @@ def main():  # noqa: C901
         commit_error = None
         if args.commit and args.prove_reproducible and not reproducible_ok:
             commit_error = f"reproducibility proof failed ({reproducible_reason}); refusing to commit"
+        elif args.commit and stale_tail:
+            commit_error = f"stale tail: newest data {newest_slot} older than end-2*resolution ({end}); refusing to commit"
         elif args.commit:
             validate_commit_target(
                 target_sensor, cfg, resolution, coverage, min_coverage
@@ -468,6 +509,8 @@ def main():  # noqa: C901
             "input_coverage": coverage,
             "min_input_coverage": min_coverage,
             "insufficient_input": insufficient_input,
+            "stale_tail": stale_tail,
+            "newest_slot": newest_slot.isoformat() if newest_slot else None,
             "n_load_slots": len(p_load),
             "peak_shaving": metric,
             "schedule": records,
@@ -495,7 +538,7 @@ def main():  # noqa: C901
             f"mode={window_mode} target_sensor={target_id} site_load_sensor={site_load_id} "
             f"window={start.isoformat()}..{end.isoformat()} steps={expected_steps} "
             f"belief_time={belief_time.isoformat()} load_slots={len(p_load)} "
-            f"coverage={coverage:.3f} insufficient_input={insufficient_input} "
+            f"coverage={coverage:.3f} insufficient_input={insufficient_input} stale_tail={stale_tail} "
             f"peak_before={metric['peak_kw_before']} peak_after={metric['peak_kw_after']} "
             f"kw_shaved={metric['kw_shaved']} pct_shaved={metric['pct_shaved']} "
             f"commit_attempted={commit_attempted} committed={commit_succeeded} "
