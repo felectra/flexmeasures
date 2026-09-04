@@ -131,11 +131,18 @@
   .draft{display:inline-block;font-family:"IBM Plex Mono",monospace;font-size:.66rem;font-weight:600;
     letter-spacing:.1em;text-transform:uppercase;color:var(--amber);border:1px solid var(--amber);
     padding:3px 9px;border-radius:20px;margin-bottom:16px}
+  .themebtn{position:fixed;top:14px;right:14px;z-index:50;font-family:"IBM Plex Mono",monospace;
+    font-size:.72rem;font-weight:600;letter-spacing:.03em;padding:7px 12px;border-radius:20px;
+    cursor:pointer;background:var(--surface);color:var(--ink);border:1px solid var(--line);
+    box-shadow:var(--shadow)}
+  .themebtn:hover{border-color:var(--teal)}
 
   @media (max-width:600px){ .grid2{grid-template-columns:1fr} .axis span:not(.tick){display:none} }
   @media (prefers-reduced-motion:no-preference){ .bars i{transition:height .6s cubic-bezier(.2,.7,.2,1)} }
   :focus-visible{outline:2px solid var(--amber);outline-offset:2px;border-radius:4px}
 </style>
+
+<button id="themebtn" class="themebtn" type="button" aria-label="Перемкнути світлу або темну тему">☾ Тема</button>
 
 <div class="wrap">
 
@@ -169,8 +176,38 @@
     <h2>Профіль Сіті Центр (Миколаїв), 30-хв, січ–серп 2026</h2>
     <p class="lede">Це не шаблон — це ваш АСКОЕ. Ніч ~3.4 кВт, широке денно-вечірнє плато ~33 кВт, вечірній пік — саме там дорога енергія.</p>
     <div class="chart">
-      <div class="bars" id="bars" aria-hidden="true"></div>
-      <div class="axis" id="axis"></div>
+      <div class="bars" aria-hidden="true">
+        <i class="charge" style="height:18px" title="00:00 — 3.4 кВт"></i>
+        <i class="charge" style="height:18px" title="01:00 — 3.4 кВт"></i>
+        <i class="charge" style="height:18px" title="02:00 — 3.4 кВт"></i>
+        <i class="charge" style="height:18px" title="03:00 — 3.4 кВт"></i>
+        <i class="charge" style="height:18px" title="04:00 — 3.4 кВт"></i>
+        <i class="charge" style="height:18px" title="05:00 — 3.4 кВт"></i>
+        <i class="charge" style="height:18px" title="06:00 — 3.4 кВт"></i>
+        <i style="height:22px" title="07:00 — 4.1 кВт"></i>
+        <i style="height:37px" title="08:00 — 6.9 кВт"></i>
+        <i style="height:119px" title="09:00 — 22.4 кВт"></i>
+        <i style="height:149px" title="10:00 — 28.1 кВт"></i>
+        <i style="height:175px" title="11:00 — 33.0 кВт"></i>
+        <i style="height:179px" title="12:00 — 33.7 кВт"></i>
+        <i style="height:186px" title="13:00 — 35.1 кВт"></i>
+        <i style="height:185px" title="14:00 — 35.0 кВт"></i>
+        <i style="height:182px" title="15:00 — 34.4 кВт"></i>
+        <i style="height:181px" title="16:00 — 34.2 кВт"></i>
+        <i class="peak" style="height:181px" title="17:00 — 34.2 кВт"></i>
+        <i class="peak" style="height:184px" title="18:00 — 34.7 кВт"></i>
+        <i class="peak" style="height:181px" title="19:00 — 34.1 кВт"></i>
+        <i class="peak" style="height:173px" title="20:00 — 32.6 кВт"></i>
+        <i class="peak" style="height:146px" title="21:00 — 27.5 кВт"></i>
+        <i class="peak" style="height:82px" title="22:00 — 15.4 кВт"></i>
+        <i class="charge" style="height:18px" title="23:00 — 3.4 кВт"></i>
+      </div>
+      <div class="axis">
+        <span class="tick">00</span><span></span><span></span><span></span><span></span><span></span>
+        <span class="tick">06</span><span></span><span></span><span></span><span></span><span></span>
+        <span class="tick">12</span><span></span><span></span><span></span><span></span><span></span>
+        <span class="tick">18</span><span></span><span></span><span></span><span></span><span></span>
+      </div>
       <div class="legend">
         <b><span class="sw" style="background:var(--charge)"></span> заряд (ніч, дешево)</b>
         <b><span class="sw" style="background:var(--discharge)"></span> розряд (вечірній пік, дорого)</b>
@@ -265,19 +302,36 @@
 </div>
 
 <script>
-  // Реальний середній добовий профіль (кВт) з АСКОЕ Сіті Центр, погодинно 00..23.
-  var kw=[3.4,3.4,3.4,3.4,3.4,3.4,3.4,4.1,6.9,22.4,28.1,33.0,33.7,35.1,35.0,34.4,34.2,34.2,34.7,34.1,32.6,27.5,15.4,3.4];
-  var mx=Math.max.apply(null,kw);
-  var bars=document.getElementById('bars'), axis=document.getElementById('axis');
-  for(var h=0;h<24;h++){
-    var i=document.createElement('i');
-    var cls = (h>=23||h<7) ? 'charge' : (h>=17&&h<23) ? 'peak' : '';
-    if(cls) i.className=cls;
-    i.style.height=Math.max(3,Math.round(kw[h]/mx*100))+'%';
-    i.title=h+':00 — '+kw[h]+' кВт';
-    bars.appendChild(i);
-    var s=document.createElement('span');
-    if(h%6===0){ s.textContent=(h<10?'0':'')+h; s.className='tick'; } else { s.textContent=''; }
-    axis.appendChild(s);
-  }
+  // Перемикач світла/темна: проставляє data-theme на <html> і памʼятає вибір.
+  // Графік — статичний HTML вище, тож він показується навіть якщо цей скрипт не виконається.
+  (function () {
+    var root = document.documentElement,
+      btn = document.getElementById("themebtn");
+    if (!btn) return;
+    function current() {
+      var t = root.getAttribute("data-theme");
+      if (t) return t;
+      return window.matchMedia &&
+        window.matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark"
+        : "light";
+    }
+    function apply(t) {
+      root.setAttribute("data-theme", t);
+      btn.textContent = t === "dark" ? "☀ Світла" : "☾ Темна";
+      btn.setAttribute("aria-pressed", t === "dark");
+    }
+    var saved = null;
+    try {
+      saved = localStorage.getItem("mx-theme");
+    } catch (e) {}
+    apply(saved || current());
+    btn.addEventListener("click", function () {
+      var t = current() === "dark" ? "light" : "dark";
+      apply(t);
+      try {
+        localStorage.setItem("mx-theme", t);
+      } catch (e) {}
+    });
+  })();
 </script>
