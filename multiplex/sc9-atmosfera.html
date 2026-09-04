@@ -1,0 +1,257 @@
+<title>Тіньовий пілот EMS</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --bg:#f5f2ec; --surface:#fffdf8; --surface-2:#efe9dd;
+    --ink:#1b1d29; --muted:#5c5f70; --faint:#83869a; --line:#e4ded1;
+    --amber:#c07d15; --amber-soft:#f5e6c8;
+    --indigo:#33377a; --indigo-soft:#e6e6f5;
+    --before:#b24a2c; --before-soft:#f2ded4;
+    --after:#1c876b; --after-soft:#d6ece2;
+    --shadow:0 1px 2px rgba(27,29,41,.05),0 8px 30px rgba(27,29,41,.06);
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --bg:#12131c; --surface:#191b27; --surface-2:#212433;
+      --ink:#f2efe6; --muted:#a7aabb; --faint:#787c90; --line:#2b2e40;
+      --amber:#f0b45a; --amber-soft:#3a2f18;
+      --indigo:#9aa0ec; --indigo-soft:#20233a;
+      --before:#e58059; --before-soft:#38211a;
+      --after:#4cc7a1; --after-soft:#16302a;
+      --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 34px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#12131c; --surface:#191b27; --surface-2:#212433;
+    --ink:#f2efe6; --muted:#a7aabb; --faint:#787c90; --line:#2b2e40;
+    --amber:#f0b45a; --amber-soft:#3a2f18;
+    --indigo:#9aa0ec; --indigo-soft:#20233a;
+    --before:#e58059; --before-soft:#38211a;
+    --after:#4cc7a1; --after-soft:#16302a;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 34px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Sans",system-ui,sans-serif; font-weight:400;
+    line-height:1.62; font-size:17px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:720px; margin:0 auto; padding:clamp(20px,5vw,56px) clamp(18px,5vw,28px)}
+  h1,h2,h3{font-family:"Bricolage Grotesque",system-ui,sans-serif; font-weight:700; text-wrap:balance; line-height:1.12; letter-spacing:-.01em}
+  p{margin:0 0 1rem; max-width:64ch}
+  a{color:var(--indigo); text-underline-offset:3px; text-decoration-thickness:1px}
+  .mono{font-family:"IBM Plex Mono",ui-monospace,monospace}
+  .num{font-variant-numeric:tabular-nums}
+
+  /* Eyebrow / header */
+  .eyebrow{font-family:"IBM Plex Mono",monospace; font-size:.72rem; font-weight:600;
+    letter-spacing:.16em; text-transform:uppercase; color:var(--amber); margin:0 0 14px}
+  .lede{font-size:clamp(1.06rem,1rem + .5vw,1.2rem); color:var(--muted); max-width:60ch}
+  h1{font-size:clamp(2rem,1.3rem + 3.2vw,3.1rem); margin:0 0 18px}
+  .byline{display:flex; flex-wrap:wrap; gap:8px 16px; margin:26px 0 0; padding-top:18px;
+    border-top:1px solid var(--line); font-size:.86rem; color:var(--faint)}
+  .byline b{color:var(--muted); font-weight:600}
+
+  /* Result card */
+  .result{background:var(--surface); border:1px solid var(--line); border-radius:16px;
+    padding:clamp(20px,4vw,32px); margin:34px 0; box-shadow:var(--shadow)}
+  .result h2{font-size:1.02rem; margin:0 0 4px; color:var(--muted); font-weight:600; letter-spacing:0}
+  .headline-num{font-family:"Bricolage Grotesque",sans-serif; font-weight:700;
+    font-size:clamp(3rem,2rem + 6vw,4.6rem); line-height:.95; color:var(--after);
+    letter-spacing:-.03em; margin:6px 0 2px}
+  .headline-num small{font-size:.32em; color:var(--muted); font-weight:600; letter-spacing:0}
+  .result .cap{color:var(--muted); font-size:.95rem; margin:0}
+
+  /* Before / after bars */
+  .bars{margin:26px 0 6px; display:flex; flex-direction:column; gap:16px}
+  .bar-row{display:grid; grid-template-columns:88px 1fr; gap:14px; align-items:center}
+  .bar-lab{font-family:"IBM Plex Mono",monospace; font-size:.78rem; color:var(--muted); text-align:right}
+  .bar-track{position:relative; height:38px; background:var(--surface-2); border-radius:8px; overflow:hidden}
+  .bar-fill{position:absolute; inset:0 auto 0 0; border-radius:8px; display:flex; align-items:center;
+    padding:0 12px; color:#fff; font-weight:600; font-size:.92rem; white-space:nowrap;
+    font-family:"IBM Plex Mono",monospace}
+  .bar-before .bar-fill{width:100%; background:var(--before)}
+  .bar-after .bar-fill{width:25%; background:var(--after); min-width:64px}
+  .bars-note{font-size:.82rem; color:var(--faint); margin:10px 0 0}
+
+  /* Sections */
+  section{margin:44px 0}
+  h2.sec{font-size:clamp(1.35rem,1.1rem + 1.1vw,1.7rem); margin:0 0 4px}
+  .sec-kicker{font-family:"IBM Plex Mono",monospace; font-size:.72rem; font-weight:600;
+    letter-spacing:.14em; text-transform:uppercase; color:var(--indigo); margin:0 0 8px}
+  h3{font-size:1.08rem; margin:26px 0 6px}
+  strong{font-weight:600; color:var(--ink)}
+  .em{color:var(--amber); font-weight:600}
+
+  /* Callout / honesty box */
+  .note{border-left:3px solid var(--amber); background:var(--amber-soft);
+    padding:14px 18px; border-radius:0 10px 10px 0; margin:22px 0; font-size:.96rem}
+  .note b{color:var(--ink)}
+
+  /* Stat grid */
+  .stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:22px 0}
+  .stat{background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:16px 16px}
+  .stat .v{font-family:"Bricolage Grotesque",sans-serif; font-weight:700; font-size:1.5rem; color:var(--ink); letter-spacing:-.02em}
+  .stat .k{font-size:.82rem; color:var(--muted); margin-top:2px}
+
+  /* Gates roadmap */
+  .gates{list-style:none; margin:20px 0 0; padding:0; display:flex; flex-direction:column; gap:2px}
+  .gate{display:grid; grid-template-columns:52px 1fr; gap:14px; align-items:baseline;
+    padding:12px 0; border-top:1px solid var(--line)}
+  .gate:first-child{border-top:none}
+  .gate .g{font-family:"IBM Plex Mono",monospace; font-weight:600; color:var(--faint); font-size:.9rem}
+  .gate.now .g{color:var(--after)}
+  .gate .t{font-weight:600}
+  .gate .d{color:var(--muted); font-size:.92rem; font-weight:400}
+  .gate.now{background:var(--after-soft); margin:0 -14px; padding:12px 14px; border-radius:10px; border-top-color:transparent}
+  .pill{display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:.66rem; font-weight:600;
+    letter-spacing:.08em; text-transform:uppercase; padding:2px 8px; border-radius:20px;
+    background:var(--after); color:#fff; vertical-align:middle; margin-left:8px}
+
+  /* Glossary */
+  .gloss{display:grid; gap:0; margin:18px 0 0}
+  .gloss div{padding:14px 0; border-top:1px solid var(--line); display:grid; grid-template-columns:150px 1fr; gap:16px}
+  .gloss dt{font-weight:600; color:var(--indigo); font-family:"IBM Plex Sans",sans-serif}
+  .gloss dd{margin:0; color:var(--muted); font-size:.95rem}
+
+  hr.rule{border:none; border-top:1px solid var(--line); margin:44px 0}
+  footer{color:var(--faint); font-size:.84rem; margin-top:10px}
+  footer .mono{color:var(--muted)}
+
+  @media (max-width:520px){
+    .gloss div{grid-template-columns:1fr; gap:2px}
+    .gate.now{margin:0 -8px; padding:12px 8px}
+    .bar-row{grid-template-columns:66px 1fr}
+  }
+  @media (prefers-reduced-motion:no-preference){
+    .bar-fill{transition:width .9s cubic-bezier(.2,.7,.2,1)}
+  }
+  :focus-visible{outline:2px solid var(--amber); outline-offset:2px; border-radius:4px}
+</style>
+
+<div class="wrap">
+
+  <p class="eyebrow">Пілот EMS · Rock 3A · Миколаїв</p>
+  <h1>Батарея вперше «подумала» вголос</h1>
+  <p class="lede">За першу добу наша система керування енергією (EMS) на реальних даних офісу порахувала, як їй керувати батареєю — і показала, що зрізала&nbsp;б пік споживання з мережі на три чверті. Поки що вона тільки рахує, нічого не вмикаючи. Це фундамент для комерційного пілота «Атмосфера» у мережі кінотеатрів Мультіплекс.</p>
+  <div class="byline">
+    <span><b>Для:</b> Сергія</span>
+    <span><b>Етап:</b> тіньовий розрахунок (рубіж G2)</span>
+    <span><b>Вікно:</b> 03.09 12:15 → 04.09 12:15 UTC · 96×15 хв</span>
+  </div>
+
+  <div class="result">
+    <h2>Головний результат за 24 години</h2>
+    <div class="headline-num num">−75%<small> пікового імпорту з мережі</small></div>
+    <p class="cap">Пік споживання з мережі впав&nbsp;би з <b>≈1.2 кВт до 0.3 кВт</b> — якби батарею вів наш EMS. Розрахунок відтворюваний, нічого не вмикалося.</p>
+
+    <div class="bars">
+      <div class="bar-row bar-before">
+        <span class="bar-lab">Пік ЗАРАЗ</span>
+        <div class="bar-track"><div class="bar-fill num">1.2 кВт</div></div>
+      </div>
+      <div class="bar-row bar-after">
+        <span class="bar-lab">Пік з EMS</span>
+        <div class="bar-track"><div class="bar-fill num">0.3 кВт</div></div>
+      </div>
+    </div>
+    <p class="bars-note">Батарея (18 кВт·год) розряджається до 5 кВт саме в години піку, тримаючи забір із мережі під стелею 0.3 кВт.</p>
+  </div>
+
+  <section>
+    <p class="sec-kicker">Що це, простими словами</p>
+    <h2 class="sec">EMS — це «мозок» для батареї</h2>
+    <p><strong>EMS</strong> (Energy Management System) вирішує, коли батареї заряджатися, а коли віддавати енергію, щоб було вигідніше й надійніше. Уяви розумного диспетчера, який дивиться на споживання будівлі й каже батареї: «зараз притримай, а от у пік — підстрахуй мережу».</p>
+    <p>Ми запустили його в <span class="em">тіньовому режимі</span>. Це як другий пілот, який уголос каже, що зробив&nbsp;би — «зараз я&nbsp;б розрядив батарею» — але <strong>керма не чіпає</strong>. Літаком і далі керує автопілот Deye; наш мозок лише рахує й записує свій план.</p>
+    <div class="note">
+      <b>Навіщо спершу «тінь», а не одразу керувати?</b> Батарея — це небезпечне залізо: хибна команда може її пошкодити або знеструмити об'єкт. Тому спершу доводимо, що мозок рахує правильно (на реальних даних, безпечно), і лише потім, крок за кроком, даємо йому кермо.
+    </div>
+  </section>
+
+  <section>
+    <p class="sec-kicker">Що зроблено за період</p>
+    <h2 class="sec">Від сирої телеметрії до розрахунку цінності</h2>
+    <p>Три речі, послідовно:</p>
+    <h3>1. Постійний потік даних у систему</h3>
+    <p>Служба інжестії безперервно заводить телеметрію інвертора Deye й двох батарейних ниток JK-BMS у базу FlexMeasures — ~117 показань щохвилини, без розривів, і сама піднімається після перезавантажень (перевірено 3&nbsp;контрольованими ребутами + холодним вимкненням живлення).</p>
+    <h3>2. Тіньовий розрахунок EMS</h3>
+    <p>Кожні 15 хвилин система бере останню добу реальних даних, рахує оптимальний графік батареї й записує його — не надсилаючи жодної команди. Працює автономно на самому міні-комп'ютері.</p>
+    <h3>3. Ми відмовилися від «театру»</h3>
+    <p>Перша, наївна ціль виявилася <strong>ілюзорною</strong>: оптимізувати батарею проти сигналу лічильника, який уже враховує цю&nbsp;ж батарею — замкнене коло, порожній результат. Ми це виявили на цифрах і замість красивої пустушки вивели <em>справжнє</em> навантаження об'єкта (споживання = мережа + батарея). Дорогою знайшли й полагодили реальну ваду в обробці даних. Це і є принцип «якість, а не аби працювало».</p>
+  </section>
+
+  <section>
+    <p class="sec-kicker">Аналіз доби</p>
+    <h2 class="sec">Що показали 96 п'ятнадцятихвилинок</h2>
+    <div class="stats">
+      <div class="stat"><div class="v num">0.48 кВт</div><div class="k">середнє споживання офісу</div></div>
+      <div class="stat"><div class="v num">1.2 кВт</div><div class="k">піковий забір із мережі</div></div>
+      <div class="stat"><div class="v num">0.9 кВт</div><div class="k">зрізали&nbsp;б у піку (≈75%)</div></div>
+      <div class="stat"><div class="v num">100%</div><div class="k">покриття даними доби</div></div>
+    </div>
+    <p>Офіс споживає небагато й рівномірно (у середньому ~0.48 кВт), але має короткі стрибки до ~1.2 кВт. EMS у ці моменти розряджав&nbsp;би батарею, а в спокійні години — не чіпав&nbsp;її, тримаючи забір із мережі рівним і низьким. Розрахунок <strong>відтворюваний</strong> (повтор на тих самих даних дає той самий план) і не надіслав жодної команди — це підтвердження, що «мозок» рахує стабільно й безпечно.</p>
+    <div class="note">
+      <b>Чесні застереження (важливо):</b> це <b>ретроспектива з ідеальним передбаченням</b> — система знала всю добу наперед, тож 75% — це <em>верхня межа потенціалу</em>, а не гарантія в реальному часі без прогнозу. Числа <b>офісного масштабу</b> (кіловати, не мегавати) — цінний тут не розмір, а <em>метод</em>. І найцінніша функція для Миколаєва — <b>резерв на відключення</b> — поки заблокована недостовірним показником заряду (SOC); це наступний крок.
+    </div>
+  </section>
+
+  <section>
+    <p class="sec-kicker">Навіщо це</p>
+    <h2 class="sec">Три реальні важелі цінності</h2>
+    <p><strong>Пікова потужність коштує грошей.</strong> Комерційні тарифи часто рахують плату за <em>пік</em> споживання, а не лише за кіловат-години. Зрізати пік = менший рахунок і менше навантаження на під'єднання до мережі.</p>
+    <p><strong>Відключення — це Миколаїв.</strong> Батарея, якою розумно керують, дає ride-through: об'єкт не «падає» під час блекауту й економніше використовує генератор.</p>
+    <p><strong>Мозок — багаторазовий.</strong> Той самий перевірений EMS-«мозок», доведений безпечно на нашому стенді, переноситься на будь-який комерційний об'єкт. Офісний пілот — це <em>полігон, що знімає ризик</em> перед реальним впровадженням.</p>
+  </section>
+
+  <section>
+    <p class="sec-kicker">Комерційний пілот</p>
+    <h2 class="sec">Як це лягає на «Атмосферу» (Мультіплекс)</h2>
+    <p>Кінотеатр — ідеальний кандидат для EMS: <strong>велике й «стрибкове» споживання</strong> (вентиляція повних залів, проєкція, концесія, освітлення), <strong>плата за пік</strong> у тарифі та <strong>висока ціна простою</strong> — блекаут посеред сеансу означає повернення квитків і зіпсоване враження.</p>
+    <p>Той самий підхід, що ми щойно довели на офісі, для «Атмосфери» дає:</p>
+    <div class="stats">
+      <div class="stat"><div class="v">Пік ↓</div><div class="k">менша плата за пікову потужність</div></div>
+      <div class="stat"><div class="v">Резерв</div><div class="k">переживання блекаутів без зупинки сеансів</div></div>
+      <div class="stat"><div class="v">Паливо ↓</div><div class="k">менше роботи генератора</div></div>
+    </div>
+    <p>Ключове для замовника: ми не «прийшли з коробкою і ввімкнули». Ми спершу <strong>тінню</strong>, на реальних даних, показуємо конкретне число («ось стільки&nbsp;б зрізали»), і лише потім, поетапно й під наглядом, даємо системі керувати. Для комерційного пілота це найнадійніший шлях знизити ризик.</p>
+  </section>
+
+  <section>
+    <p class="sec-kicker">Дорожня карта</p>
+    <h2 class="sec">Сходинки: спершу думати, потім діяти</h2>
+    <p>Система рухається рубежами — від безпечного до відповідального. Кожен перехід — окреме рішення; «зелене світло» на одному кроці не дає права на наступний.</p>
+    <ul class="gates">
+      <li class="gate"><span class="g">G0–G1</span><span><span class="t">Постановка + чесні дані.</span> <span class="d">Контракт телеметрії, точні сигнали, збережений набір даних.</span></span></li>
+      <li class="gate now"><span class="g">G2</span><span><span class="t">Тіньовий розрахунок<span class="pill">ми тут</span></span><br><span class="d">Рахує рішення й журналює, нічого не виконуючи. Саме цей крок щойно запущено.</span></span></li>
+      <li class="gate"><span class="g">G3</span><span><span class="t">Імітація запису.</span> <span class="d">Команда приймається, перевіряється, журналюється — але на залізо не йде.</span></span></li>
+      <li class="gate"><span class="g">G4</span><span><span class="t">Одна ручна команда.</span> <span class="d">Перша реальна дія — під наглядом оператора, з окремим дозволом.</span></span></li>
+      <li class="gate"><span class="g">G5–G6</span><span><span class="t">Сценарій → кандидат у виробництво.</span> <span class="d">Короткі контрольовані прогони, потім пакет доказів для впровадження.</span></span></li>
+    </ul>
+    <p style="margin-top:18px">Паралельно вже закладено <strong>наступний етап</strong>: вивести <em>достовірний</em> заряд батареї з даних JK-BMS, щоб розблокувати тіньову «готовність до відключень» — найцінніший сценарій саме для Миколаєва й для кінотеатру.</p>
+  </section>
+
+  <hr class="rule">
+
+  <section style="margin-top:0">
+    <p class="sec-kicker">Словничок новачка</p>
+    <h2 class="sec">Кілька слів простими словами</h2>
+    <dl class="gloss">
+      <div><dt>EMS</dt><dd>Система керування енергією — «мозок», що вирішує, коли заряджати/розряджати батарею.</dd></div>
+      <div><dt>Тіньовий режим</dt><dd>Мозок рахує найкращий план, але керма не чіпає. Безпечно: нічого не вмикається.</dd></div>
+      <div><dt>Зрізання піків</dt><dd>Батарея підстраховує в моменти найбільшого споживання, щоб забір із мережі не «стрибав».</dd></div>
+      <div><dt>кВт / кВт·год</dt><dd>кВт — потужність «зараз» (як швидкість); кВт·год — енергія за час (як пройдена відстань).</dd></div>
+      <div><dt>SOC</dt><dd>Рівень заряду батареї у відсотках. Тут поки недостовірний — тому «резерв на відключення» ще попереду.</dd></div>
+      <div><dt>Рубіж (G2…)</dt><dd>Контрольна сходинка зрілості. G2 = «думає, але не діє». Чим вищий, тим більше відповідальності.</dd></div>
+    </dl>
+  </section>
+
+  <footer>
+    <p>Стенд: Radxa ROCK 3A · Deye SG02LP1 + 2×JK-BMS · FlexMeasures. Розрахунок запущено <span class="mono">2026-09-04 12:25 UTC</span>, повний звіт перевірки — після 24&nbsp;год безперервної роботи. Числа — з живого стенда; це тіньова оцінка потенціалу, не рахунок за фактом.</p>
+  </footer>
+
+</div>
