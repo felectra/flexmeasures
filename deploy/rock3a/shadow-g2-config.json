@@ -6,7 +6,7 @@
   "horizon_hours": 24,
   "solver": "highspy",
   "min_input_coverage": 0.9,
-  "site_load_sensor_id": null,
+  "site_load_sensor_id": 46,
   "target_output_sensor_id": 45,
   "scheduling_sensor_id_for_validation": 17,
   "sign_convention": {
