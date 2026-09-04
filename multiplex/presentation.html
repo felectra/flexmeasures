@@ -1,0 +1,280 @@
+<title>EMS для Мультіплекс</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --bg:#f3f5f4; --surface:#ffffff; --surface-2:#e9eeec; --band:#e7f0ec;
+    --ink:#132321; --muted:#4f605c; --faint:#7c8c88; --line:#dde5e2;
+    --teal:#0f5f59; --teal-2:#0b4742;
+    --green:#12925f; --green-soft:#d7efe3;
+    --amber:#c07d15; --amber-soft:#f6e7c9;
+    --charge:#12925f; --discharge:#c9701a; --neutral:#9fb3ad;
+    --shadow:0 1px 2px rgba(19,35,33,.05),0 10px 34px rgba(19,35,33,.07);
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --bg:#0c1514; --surface:#111e1c; --surface-2:#182927; --band:#132321;
+      --ink:#eef3f1; --muted:#a4b5b0; --faint:#71827d; --line:#22322f;
+      --teal:#3fb9ac; --teal-2:#6fd0c4;
+      --green:#3ec98a; --green-soft:#123026;
+      --amber:#eab255; --amber-soft:#33280f;
+      --charge:#3ec98a; --discharge:#e19a54; --neutral:#4b5f5a;
+      --shadow:0 1px 2px rgba(0,0,0,.3),0 12px 36px rgba(0,0,0,.4);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0c1514; --surface:#111e1c; --surface-2:#182927; --band:#132321;
+    --ink:#eef3f1; --muted:#a4b5b0; --faint:#71827d; --line:#22322f;
+    --teal:#3fb9ac; --teal-2:#6fd0c4;
+    --green:#3ec98a; --green-soft:#123026;
+    --amber:#eab255; --amber-soft:#33280f;
+    --charge:#3ec98a; --discharge:#e19a54; --neutral:#4b5f5a;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 12px 36px rgba(0,0,0,.4);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:17px;line-height:1.6;
+    -webkit-font-smoothing:antialiased}
+  .wrap{max-width:860px;margin:0 auto;padding:clamp(20px,4vw,44px) clamp(18px,5vw,32px)}
+  h1,h2,h3{font-family:"Archivo",system-ui,sans-serif;font-weight:800;letter-spacing:-.02em;
+    text-wrap:balance;line-height:1.08;margin:0}
+  p{margin:0 0 1rem;max-width:66ch}
+  .mono{font-family:"IBM Plex Mono",ui-monospace,monospace}
+  .num{font-variant-numeric:tabular-nums}
+  .eyebrow{font-family:"IBM Plex Mono",monospace;font-size:.72rem;font-weight:600;
+    letter-spacing:.16em;text-transform:uppercase;color:var(--teal);margin:0 0 14px}
+  a{color:var(--teal)}
+
+  section{margin:0 0 clamp(40px,7vw,72px)}
+  .slide-kicker{font-family:"IBM Plex Mono",monospace;font-size:.72rem;font-weight:600;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--amber);margin:0 0 10px}
+  h2{font-size:clamp(1.5rem,1.1rem + 1.8vw,2.1rem);margin:0 0 12px}
+  h3{font-family:"Archivo";font-weight:700;font-size:1.06rem;margin:22px 0 6px}
+  strong{font-weight:600}
+  .em-green{color:var(--green);font-weight:600}
+  .lede{font-size:clamp(1.05rem,1rem + .5vw,1.22rem);color:var(--muted);max-width:60ch}
+
+  .hero{background:linear-gradient(160deg,var(--teal-2),var(--teal));color:#f2fbf8;
+    border-radius:20px;padding:clamp(26px,5vw,48px);box-shadow:var(--shadow);margin-bottom:22px}
+  .hero .eyebrow{color:#8fe6d6}
+  .hero h1{font-size:clamp(1.9rem,1.3rem + 3vw,3rem);color:#fff}
+  .hero p{color:#d3ece5;max-width:56ch;margin-top:14px}
+  .hero-nums{display:flex;flex-wrap:wrap;gap:14px 34px;margin-top:26px;padding-top:22px;
+    border-top:1px solid rgba(255,255,255,.18)}
+  .hero-nums .v{font-family:"Archivo";font-weight:800;font-size:clamp(1.35rem,1rem+1.6vw,1.9rem);
+    color:#fff;letter-spacing:-.02em;line-height:1.05}
+  .hero-nums .k{font-size:.82rem;color:#b7ded5;margin-top:5px;max-width:22ch}
+
+  .chart{background:var(--surface);border:1px solid var(--line);border-radius:16px;
+    padding:22px clamp(16px,3vw,26px);box-shadow:var(--shadow)}
+  .bars{display:grid;grid-template-columns:repeat(24,1fr);gap:2px;align-items:end;height:190px;
+    margin:10px 0 6px}
+  .bars i{display:block;border-radius:3px 3px 0 0;background:var(--neutral);min-height:3px}
+  .bars i.charge{background:var(--charge)}
+  .bars i.peak{background:var(--discharge)}
+  .axis{display:grid;grid-template-columns:repeat(24,1fr);gap:2px;
+    font-family:"IBM Plex Mono",monospace;font-size:.6rem;color:var(--faint)}
+  .axis span{text-align:center}
+  .axis span.tick{color:var(--muted)}
+  .legend{display:flex;flex-wrap:wrap;gap:8px 20px;margin-top:14px;font-size:.85rem;color:var(--muted)}
+  .legend b{display:inline-flex;align-items:center;gap:7px;font-weight:400}
+  .sw{width:12px;height:12px;border-radius:3px;display:inline-block}
+
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:20px 0}
+  .stat{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .stat .v{font-family:"Archivo";font-weight:800;font-size:1.5rem;letter-spacing:-.02em}
+  .stat .k{font-size:.82rem;color:var(--muted);margin-top:2px}
+
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:var(--surface);
+    box-shadow:var(--shadow)}
+  table{border-collapse:collapse;width:100%;min-width:520px;font-size:.94rem}
+  th,td{padding:12px 16px;text-align:right;border-bottom:1px solid var(--line)}
+  th:first-child,td:first-child{text-align:left}
+  thead th{font-family:"IBM Plex Mono",monospace;font-size:.72rem;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--faint);font-weight:600}
+  tbody tr:last-child td{border-bottom:none}
+  tbody tr.illus{background:var(--surface-2)}
+  tbody tr.illus td:first-child{font-weight:600;color:var(--teal)}
+  td .pay{color:var(--muted);font-size:.86em}
+  caption{caption-side:bottom;text-align:left;padding:10px 16px;color:var(--faint);font-size:.8rem}
+
+  .note{border-left:3px solid var(--amber);background:var(--amber-soft);padding:14px 18px;
+    border-radius:0 12px 12px 0;margin:16px 0;font-size:.96rem}
+  .note b{color:var(--ink)}
+  .callout{border:1px solid var(--amber);background:var(--amber-soft);border-radius:14px;
+    padding:18px 20px;margin:0 0 40px}
+  .callout h3{margin:0 0 8px;font-size:1rem;color:var(--ink)}
+  .callout p{margin:0;font-size:.95rem;color:var(--ink);max-width:70ch}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:18px 0}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:20px}
+  .card h3{margin-top:0}
+  .tag{display:inline-block;font-family:"IBM Plex Mono",monospace;font-size:.64rem;font-weight:600;
+    letter-spacing:.08em;text-transform:uppercase;padding:2px 8px;border-radius:20px;
+    background:var(--amber-soft);color:var(--amber);border:1px solid var(--amber);vertical-align:middle}
+
+  ol.steps{counter-reset:s;list-style:none;padding:0;margin:18px 0 0;display:flex;flex-direction:column;gap:2px}
+  ol.steps li{counter-increment:s;display:grid;grid-template-columns:40px 1fr;gap:14px;
+    padding:14px 0;border-top:1px solid var(--line);align-items:baseline}
+  ol.steps li:first-child{border-top:none}
+  ol.steps li::before{content:counter(s);font-family:"Archivo";font-weight:800;color:var(--teal);
+    font-size:1.2rem;line-height:1}
+  ol.steps b{font-weight:600}
+  ol.steps .d{color:var(--muted);font-size:.94rem}
+
+  hr.rule{border:none;border-top:1px solid var(--line);margin:0 0 clamp(40px,7vw,72px)}
+  footer{color:var(--faint);font-size:.82rem;border-top:1px solid var(--line);padding-top:18px}
+  .draft{display:inline-block;font-family:"IBM Plex Mono",monospace;font-size:.66rem;font-weight:600;
+    letter-spacing:.1em;text-transform:uppercase;color:var(--amber);border:1px solid var(--amber);
+    padding:3px 9px;border-radius:20px;margin-bottom:16px}
+
+  @media (max-width:600px){ .grid2{grid-template-columns:1fr} .axis span:not(.tick){display:none} }
+  @media (prefers-reduced-motion:no-preference){ .bars i{transition:height .6s cubic-bezier(.2,.7,.2,1)} }
+  :focus-visible{outline:2px solid var(--amber);outline-offset:2px;border-radius:4px}
+</style>
+
+<div class="wrap">
+
+  <span class="draft">Чернетка · ілюстративна модель на ваших даних — не комерційна пропозиція</span>
+
+  <div class="hero">
+    <p class="eyebrow">Перший розрахунок · Мережа кінотеатрів Мультіплекс</p>
+    <h1>Скільки батарея під керуванням нашої EMS може зекономити на вашій електроенергії</h1>
+    <p>Ми прогнали <strong>ваш реальний 30-хв профіль</strong> (Сіті Центр, Миколаїв) через оптимізатор нашої EMS. Нижче — прозорий перший розрахунок: що показує модель, на яких припущеннях, і що ми маємо звірити з вами, перш ніж називати точні гроші.</p>
+    <div class="hero-nums">
+      <div><div class="v num">сотні тис грн/рік</div><div class="k">ілюстративна валова економія на кінотеатр — модельна верхня межа</div></div>
+      <div><div class="v">потрібен ваш тариф</div><div class="k">щоб оцінку перетворити на точний розрахунок</div></div>
+      <div><div class="v num">20+</div><div class="k">кінотеатрів → потенційна гуртова позиція</div></div>
+    </div>
+  </div>
+
+  <div class="callout">
+    <h3>Як читати числа на цих слайдах</h3>
+    <p>Усі суми тут — <strong>модельна ВЕРХНЯ МЕЖА</strong>, а не обіцянка. Оптимізатор бачить ціни й навантаження ідеально («ясновидець»); зонні ціни — <strong>синтетичні</strong> (не ваш рахунок і не історія РДН); «окупність» — <strong>проста, лише capex ÷ валова економія</strong>, без OPEX, деградації, монтажу й фінансування. Реальні цифри будуть нижчими та уточняться після вашого тарифу й комерційних пропозицій. Ми показуємо це так свідомо — щоб з профі АСКОЕ говорити чесно.</p>
+  </div>
+
+  <section>
+    <p class="slide-kicker">Важіль</p>
+    <h2>У чому економія</h2>
+    <p>Ваші кінотеатри споживають багато й у найдорожчі години — вдень і ввечері. <strong>Батарея + розумна EMS</strong> зсуває споживання в часі: заряджається вночі (та влітку опівдні, коли багато сонця й ціна низька) і віддає у вечірній пік. Ви берете ту саму енергію дешевше.</p>
+    <p>Рухається лише <strong>енергетична складова</strong> ціни (передача й розподіл — плоскі), тож економія ≈ спред «дорого мінус дешево» × зсунута енергія, мінус втрати на цикл. <strong>Наявні навантаження</strong> кінотеатру при цьому не змінюються; сам монтаж BESS (перетворювач, захист, кабелі, облік, ліміти приєднання, безпека) — окремий інженерний етап, який ще треба проєктувати.</p>
+  </section>
+
+  <section>
+    <p class="slide-kicker">Ваші дані</p>
+    <h2>Профіль Сіті Центр (Миколаїв), 30-хв, січ–серп 2026</h2>
+    <p class="lede">Це не шаблон — це ваш АСКОЕ. Ніч ~3.4 кВт, широке денно-вечірнє плато ~33 кВт, вечірній пік — саме там дорога енергія.</p>
+    <div class="chart">
+      <div class="bars" id="bars" aria-hidden="true"></div>
+      <div class="axis" id="axis"></div>
+      <div class="legend">
+        <b><span class="sw" style="background:var(--charge)"></span> заряд (ніч, дешево)</b>
+        <b><span class="sw" style="background:var(--discharge)"></span> розряд (вечірній пік, дорого)</b>
+        <b><span class="sw" style="background:var(--neutral)"></span> денне плато</b>
+      </div>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="v num">~33 кВт</div><div class="k">денно-вечірнє плато</div></div>
+      <div class="stat"><div class="v num">~3.4 кВт</div><div class="k">нічна база</div></div>
+      <div class="stat"><div class="v num">~178 кВт·год</div><div class="k">сер. вечірнє навантаження 17–23 (стеля розряду)</div></div>
+      <div class="stat"><div class="v num">~11–17 тис</div><div class="k">кВт·год/міс* (влітку більше)</div></div>
+    </div>
+    <p style="color:var(--faint);font-size:.8rem;margin-top:-6px">* Місячні суми рахуються по наявних слотах (є пропуски даних); січень і лютий у вибірці неповні. Точні місячні обсяги — з ваших рахунків.</p>
+  </section>
+
+  <section>
+    <p class="slide-kicker">Результат нашої EMS</p>
+    <h2>FlexMeasures на вашому профілі <span class="tag">модельна верхня межа</span></h2>
+    <p>Ми прогнали <strong>LP-ядро планувальника нашої EMS</strong> (той самий оптимізатор, що стоїть за StorageScheduler) на 196 повних добах ваших даних. Він рахує оптимальний графік батареї — без експорту, лише самоспоживання. Числа нижче — за <strong>синтетичними зонними цінами</strong> (ілюстрація потенціалу спреду, не ваш тариф) і за <strong>ідеального передбачення</strong>:</p>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Батарея</th><th>ToU-сценарій (спред 7.2)</th><th>РДН-сценарій (спред 9.6)</th></tr></thead>
+        <tbody>
+          <tr><td>100 кВт·год</td><td><span class="num">207 тис/рік</span> <span class="pay num">· 6.8 р</span></td><td><span class="num">295 тис/рік</span> <span class="pay num">· 4.7 р</span></td></tr>
+          <tr class="illus"><td>150 кВт·год · ілюстративно</td><td><span class="num">309 тис/рік</span> <span class="pay num">· 6.8 р</span></td><td><span class="num">441 тис/рік</span> <span class="pay num">· 4.8 р</span></td></tr>
+          <tr><td>200 кВт·год</td><td><span class="num">392 тис/рік</span> <span class="pay num">· 7.1 р</span></td><td><span class="num">556 тис/рік</span> <span class="pay num">· 5.0 р</span></td></tr>
+        </tbody>
+        <caption>Валова економія за ідеального передбачення; «окупність» — проста capex ÷ економія (без OPEX/деградації/фінансування), capex 14 000 грн/кВт·год (припущення, не пропозиція постачальника). ККД 87%, ~0.5C. РДН-сценарій вимагає доступу до ринку/агрегації й волатильний по днях. Річна оцінка = середнє по 196 повних добах × 365 (вибірка зміщена до літа — імовірно завищує).</caption>
+      </table>
+    </div>
+    <p style="margin-top:16px">Конфігурація <strong>150 кВт·год / 75 кВт</strong> у таблиці — <strong>ілюстративна</strong>, не висновок сайзингу: у діапазоні 100–200 кВт·год «коліна» ефективності немає, а 75 кВт — просто прийняте співвідношення 0.5C. Остаточну ємність підбираємо під ваш пік, обмеження майданчика та NPV-аналіз.</p>
+  </section>
+
+  <section>
+    <p class="slide-kicker">Чесно про числа</p>
+    <h2>Що робить результат нижчим і від чого він залежить</h2>
+    <div class="note"><b>Верхня межа.</b> Оптимізатор бачить ціни й навантаження ідеально; у реальному часі з прогнозом результат менший, а РДН-спред волатильний. Зонні ціни — синтетичні, не ваш тариф.</div>
+    <div class="note"><b>Головний невідомий — структура вашого тарифу.</b> 12.38 грн ми поки розкладаємо на плоску мережу й змінну енергію модельно. Реальний розподіл зсуває просту окупність у діапазоні <strong>5.9 → 12.7 року</strong> (ToU, 150 кВт·год). Один ваш рахунок — і замість оцінки буде калібрований розрахунок.</div>
+    <div class="note"><b>База ПДВ якоря невідома.</b> Якщо 12.38 — з ПДВ, чиста економія бізнесу ~×0.83. Уточнюється тим самим рахунком.</div>
+    <div class="note"><b>«Окупність» тут неповна.</b> Це лише capex ÷ валова економія. Повний бізнес-кейс має врахувати деградацію, власне споживання/доступність, O&M, заміну, фінансування, податки й монтаж — за реальними пропозиціями. Тому одиничний кінотеатр — це багаторічна окупність, а не миттєвий кейс.</div>
+  </section>
+
+  <section>
+    <p class="slide-kicker">Масштаб</p>
+    <h2>Де потенційно більший важіль — портфель мережі</h2>
+    <div class="grid2">
+      <div class="card">
+        <h3>Гуртова позиція 20+ об'єктів <span class="tag">гіпотеза</span></h3>
+        <p style="margin:0">Сумарний профіль мережі під одним постачальником може дати кращу цінову формулу, ніж у кожного кінотеатру окремо. Це поки <strong>неквантифікована комерційна гіпотеза</strong> — рахуємо, коли зведемо профілі всіх об'єктів; це не те саме, що ліцензована ринкова агрегація.</p>
+      </div>
+      <div class="card">
+        <h3>Один EMS — багаторазовий</h3>
+        <p style="margin:0">Той самий перевірений оптимізатор тиражується на всі майданчики. У нас уже є працююча EMS і ваші АСКОЕ-дані — фундамент для розрахунків готовий.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="slide-kicker">Фінансування</p>
+    <h2>Попутні вітри для проєкту</h2>
+    <div class="stats">
+      <div class="stat"><div class="v">ПДВ + мито 0%</div><div class="k">на Li-ion акумулятори/інвертори (до ~2028) — уже враховано в capex-припущенні вище</div></div>
+      <div class="stat"><div class="v">«5-7-9%»</div><div class="k">пільгові кредити тепер покривають накопичення</div></div>
+    </div>
+    <p>Пільга ПДВ/мита вже закладена в capex у таблиці, тож <strong>окремо в окупність її не додаємо</strong>. «5-7-9» змінює грошовий потік фінансування (а не просту окупність) і залежить від прийнятності банку та відповідності умовам — моделюється окремо в повному кейсі.</p>
+  </section>
+
+  <section>
+    <p class="slide-kicker">Чому ми</p>
+    <h2>Спершу довести безпечно, потім керувати</h2>
+    <p>Ми не «приходимо з коробкою і вмикаємо». Наш підхід — <strong>тіньовий режим</strong>: EMS рахує оптимальні рішення на ваших реальних даних, <em>нічого не вмикаючи</em>, і показує конкретне число. Лише після цього, поетапно й під наглядом, система бере кермо. Для комерційного об'єкта це найнадійніший шлях знизити ризик.</p>
+    <div class="note">
+      <b>Що вже працює.</b> На нашому лабораторному стенді EMS (та сама FlexMeasures) у тіньовому режимі виконує <strong>відтворюваний розрахунок</strong> оптимального графіка на реальних даних. Це офісний масштаб, за ідеального передбачення, <strong>без жодної команди на обладнання</strong>, і телеметрія SOC поки ненадійна — тож це доказ обчислювального ланцюга, а не доведена автономна робота на об'єкті.
+    </div>
+  </section>
+
+  <section>
+    <p class="slide-kicker">Далі</p>
+    <h2>Кроки</h2>
+    <ol class="steps">
+      <li><span><b>Реальний тариф.</b> <span class="d">Один рахунок кінотеатру → калібруємо числа (структура тарифу, база ПДВ) — з оцінних у обґрунтовані.</span></span></li>
+      <li><span><b>Пілот на одному кінотеатрі — з актуацією.</b> <span class="d">Місяць роботи з узгодженим протоколом вимірювання й верифікації (M&V) → фактична економія, підбір ємності, реальні пропозиції на BESS.</span></span></li>
+      <li><span><b>Масштаб на мережу.</b> <span class="d">Тиражування EMS + зведення профілів 20+ об'єктів → перевіряємо гіпотезу гуртової позиції на числах.</span></span></li>
+    </ol>
+  </section>
+
+  <hr class="rule">
+  <footer>
+    <p>Чернетка першого розрахунку · наша EMS = FlexMeasures. Числа — модельна верхня межа за ідеального передбачення на реальному 30-хв профілі АСКОЕ (Сіті Центр, Миколаїв, січ–серп 2026), за синтетичними зонними цінами навколо якоря 12.38 грн/кВт·год; «окупність» — проста, лише capex. Це не комерційна пропозиція й не обіцянка результату; точні цифри — після вашого тарифу, комерційних пропозицій і пілоту з вимірюванням. Ринкові дані — з відкритих джерел UA 2025–2026.</p>
+  </footer>
+
+</div>
+
+<script>
+  // Реальний середній добовий профіль (кВт) з АСКОЕ Сіті Центр, погодинно 00..23.
+  var kw=[3.4,3.4,3.4,3.4,3.4,3.4,3.4,4.1,6.9,22.4,28.1,33.0,33.7,35.1,35.0,34.4,34.2,34.2,34.7,34.1,32.6,27.5,15.4,3.4];
+  var mx=Math.max.apply(null,kw);
+  var bars=document.getElementById('bars'), axis=document.getElementById('axis');
+  for(var h=0;h<24;h++){
+    var i=document.createElement('i');
+    var cls = (h>=23||h<7) ? 'charge' : (h>=17&&h<23) ? 'peak' : '';
+    if(cls) i.className=cls;
+    i.style.height=Math.max(3,Math.round(kw[h]/mx*100))+'%';
+    i.title=h+':00 — '+kw[h]+' кВт';
+    bars.appendChild(i);
+    var s=document.createElement('span');
+    if(h%6===0){ s.textContent=(h<10?'0':'')+h; s.className='tick'; } else { s.textContent=''; }
+    axis.appendChild(s);
+  }
+</script>
