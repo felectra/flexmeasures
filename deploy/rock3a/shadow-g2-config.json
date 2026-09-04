@@ -1,13 +1,20 @@
 {
-  "version": "sc9-shadow-peakshave-v2",
-  "objective": "shadow peak-shaving of grid import (deye/ac/total_grid_power, Office)",
+  "version": "sc9-retrospective-derived-load-v3",
+  "objective": "quantified shadow peak-shaving of the DERIVED real site load (P_load = grid + battery), retrospective backcast",
+  "window_mode": "retrospective",
   "resolution": "PT15M",
   "horizon_hours": 24,
   "solver": "highspy",
   "min_input_coverage": 0.9,
-  "expected_inflexible_sensor_ids": [7],
+  "site_load_sensor_id": null,
   "target_output_sensor_id": 45,
   "scheduling_sensor_id_for_validation": 17,
+  "sign_convention": {
+    "grid": "deye/ac/total_grid_power (sensor 7): positive = import from the grid.",
+    "battery": "deye/battery/power (sensor 17): positive = discharge, negative = charge (verified: 3oh read -78 W while charging).",
+    "pv": "~0 at this bench.",
+    "load": "P_load = P_grid + P_batt, e.g. import 540 + battery -78 (charging) = 462 W real load."
+  },
   "battery": {
     "capacity_kwh": 18.0,
     "capacity_sensitivity_kwh": 19.7,
@@ -19,20 +26,22 @@
     "discharging_efficiency_pct": 95
   },
   "flex_context": {
-    "inflexible-consumption": [{"sensor": 7}],
     "site-peak-consumption": "0.3 kW",
     "site-peak-consumption-price": "120 EUR/MW",
     "consumption-price": "50 EUR/MWh",
     "production-price": "50 EUR/MWh"
   },
   "assumptions": {
+    "derived_load": "The inflexible load is the DERIVED site load P_load = grid + battery, written to the site-load sensor, NOT the behind-meter net grid; scheduling against the raw net grid is circular and near-trivial (see shadow-g2.md).",
+    "inflexible_wiring": "flex_context inflexible-consumption is injected at runtime as [{sensor: site_load_sensor_id}]; run seed-site-load-sensor.py, then set site_load_sensor_id here.",
+    "window": "Retrospective backcast: end = floor(now), start = the continuous t2t run start within the horizon; the window grows to 24 h as data accumulates.",
+    "perfect_hindsight": "The shadow knows the whole window's load, so the reported peak reduction is a potential upper bound, not what a real-time EMS without a forecast could guarantee.",
     "capacity": "18 kWh is nameplate/calc, NOT measured; 19.7 kWh kept as a sensitivity value; SOH unknown.",
     "soc_at_start": "Fixed 50% is an explicit assumption; there is no trustworthy live SOC (deye/battery/soc is forbidden, and the two strings diverge 53/24%).",
     "soc_band": "10-100% SOC band is a modelling choice; the hard voltage window 44-57 V is never widened.",
     "efficiency": "95%/95% charging/discharging is a declared round-trip efficiency, not a measurement.",
     "prices": "Flat 50 EUR/MWh consumption=production is an internal nudge, not a tariff; the round-trip loss keeps the battery idle unless the peak price forces action.",
     "peak": "site-peak-consumption 0.3 kW baseline and 120 EUR/MW price are an internal peak-shaving nudge, not a measured or contracted limit.",
-    "grid_signal": "deye/ac/total_grid_power already nets the battery (behind-the-meter), so wiring it as the inflexible load makes this a SHADOW illustration, not a true dispatch.",
-    "prerequisite": "A meaningful 24h run needs CONTINUOUS ingestion of the inflexible sensor; this is now provided by the labems-t2t service (the labems-3oh bridge was one-shot), so coverage is ~1.0, and min_input_coverage still gates --commit against any future gap (see shadow-g2.md)."
+    "prerequisite": "Needs CONTINUOUS ingestion (labems-t2t) so the derivation inputs cover the window; min_input_coverage gates --commit against any gap (see shadow-g2.md)."
   }
 }

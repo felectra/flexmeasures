@@ -2,24 +2,21 @@
 
 COMPUTE-ONLY by default.
 This never sends a command and never publishes to the broker — it instantiates no MQTT client at all.
-It asks FlexMeasures' StorageScheduler for a battery schedule on the live labems-3oh sensors,
-records the inputs and the resulting schedule to a reproducible log, and — only with --commit —
-stores the schedule as beliefs on a dedicated, strictly validated output sensor.
-Storing is a write to FlexMeasures' own database only; nothing reaches the broker, the bridge, the
-inverter, or the BMS boards.
+It quantifies peak-shaving on the DERIVED real site load over a RETROSPECTIVE (past) window, records the inputs, the schedule, and the value metric to a reproducible log, and — only with --commit — persists the derived load and the battery schedule to dedicated, strictly validated sensors.
+Storing is a write to FlexMeasures' own database only; nothing reaches the broker, the bridge, the inverter, or the BMS boards.
 
-belief_time defaults to now and is RECORDED in every run; pass --belief-time to pin it.
-Reproducibility is proven by re-running with the SAME recorded belief_time: FlexMeasures then reads
-exactly the same beliefs, and the deterministic HiGHS solver returns an identical schedule.
-Run --prove-reproducible to compute twice on the same pinned inputs and ENFORCE that the two outputs
-match (a non-proof — empty, all-NaN, or wrong length — exits non-zero).
+Why the derived load: scheduling peak-shaving against the behind-meter deye/ac/total_grid_power is circular (the net grid already nets the battery), which gives coverage ~0.01 and a near-trivial schedule.
+The honest inflexible load is P_load = P_grid + P_batt (grid import positive; battery discharge positive), computed from deye/ac/total_grid_power (7) and deye/battery/power (17); PV is ~0 at this bench.
+The schedule then shaves the real grid-import peak by dispatching the battery, and the value metric reports the peak reduction — see shadow-g2.md.
 
-Objective (versioned in shadow-g2-config.json): shadow peak-shaving of grid import
-(deye/ac/total_grid_power, Office) expressed as a priced site-peak-consumption commitment.
-The peak baseline and price, the bank capacity, the start SOC, and the efficiencies are DECLARED
-PARAMETERS, not measurements — see shadow-g2.md.
+Retrospective (backcast) window: there is no future load forecast, so the schedule is computed over the observed past — end = floor(now), start = the start of the continuous t2t run within the horizon (not the sparse pre-t2t 3oh samples).
+It is a PERFECT-HINDSIGHT upper bound: the shadow knows the whole window's load, so the reported peak reduction is potential, not what a real-time EMS without a forecast could guarantee.
 
-Usage (read-only broker; writes the FlexMeasures DB only with --commit):
+belief_time defaults to now (all past data visible) and is RECORDED; pass --belief-time to pin it.
+Run --prove-reproducible to compute twice on the same window and ENFORCE identical, non-empty output (the length check uses the ACTUAL window steps).
+
+Usage (read-only broker; writes the FM DB only with --commit):
+    podman cp deploy/rock3a/sc9_core.py rock3a_server_1:/tmp/sc9_core.py
     podman cp deploy/rock3a/shadow_schedule.py rock3a_server_1:/tmp/shadow_schedule.py
     podman cp deploy/rock3a/shadow-g2-config.json rock3a_server_1:/tmp/shadow-g2-config.json
     podman exec -i rock3a_server_1 python /tmp/shadow_schedule.py --config /tmp/shadow-g2-config.json
@@ -28,105 +25,81 @@ Usage (read-only broker; writes the FlexMeasures DB only with --commit):
 import argparse
 import hashlib
 import json
-import math
 import os
-import re
 import sys
 from datetime import datetime, timedelta, timezone
 
 # Never provision template assets on startup: that commits (app.py), and the compute path must not
 # write anything to the database.
-os.environ.setdefault("FLEXMEASURES_CREATE_TEMPLATE_ASSETS_ON_STARTUP", "false")
+# Force it off (not setdefault), so an inherited env cannot re-enable the committing provisioner.
+os.environ["FLEXMEASURES_CREATE_TEMPLATE_ASSETS_ON_STARTUP"] = "false"
 
+import sc9_core  # noqa: E402
 from flexmeasures.app import create as create_app  # noqa: E402
 
-# Sources that must never feed a schedule: the inverter SOC lies, and the deye/bms/* group is zeros.
-FORBIDDEN_TOPIC_PREFIXES = ("deye/battery/soc", "deye/bms/")
+OFFICE_ASSET_ID = 5
 BATTERYBANK_ASSET_ID = 6
+GRID_SENSOR_ID = 7  # deye/ac/total_grid_power, W, positive = import
+BATT_SENSOR_ID = 17  # deye/battery/power, W, positive = discharge
+DERIVED_SOURCE_NAME = "sc9-derived"
+SCHEDULE_SOURCE_NAME = "sc9-schedule"
 
 
-def is_forbidden(topic):
-    return bool(topic) and any(
-        topic == p or topic.startswith(p) for p in FORBIDDEN_TOPIC_PREFIXES
-    )
-
-
-def _isoparse(text: str, field: str) -> datetime:
-    dt = datetime.fromisoformat(text)
+def _to_utc(dt):
+    """Normalize a (pandas or python) datetime to a timezone-aware UTC python datetime."""
+    if hasattr(dt, "to_pydatetime"):
+        dt = dt.to_pydatetime()
     if dt.tzinfo is None:
-        raise SystemExit(
-            f"{field} must be timezone-aware (e.g. 2026-09-02T08:00:00+00:00): {text!r}"
-        )
+        dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
 
 
-def _floor_to(dt: datetime, resolution: timedelta) -> datetime:
-    step = int(resolution.total_seconds())
-    epoch = int(dt.timestamp())
-    return datetime.fromtimestamp(epoch - (epoch % step), tz=timezone.utc)
+def resample_by_slot(sensor, start, end, belief_time, resolution, scale=1.0):
+    """Return {utc_slot_start: value * scale} for the sensor over [start, end] as of belief_time.
 
-
-def _iso_duration_to_timedelta(text: str) -> timedelta:
-    # Minimal ISO-8601 duration reader for the shapes we version (PT15M, PT1H, PT24H).
-    m = re.fullmatch(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", text)
-    if not m:
-        raise ValueError(f"Unsupported duration: {text!r}")
-    hours, minutes, seconds = (int(g) if g else 0 for g in m.groups())
-    return timedelta(hours=hours, minutes=minutes, seconds=seconds)
-
-
-def build_flex_model(cfg: dict) -> dict:
-    """Turn the declared battery parameters into a StorageScheduler flex-model.
-
-    Capacity, start SOC, the SOC band, and the efficiencies are explicit parameters (see the config's
-    assumptions), not measurements.
+    One deterministic belief per slot, resampled to resolution; NaN slots are dropped.
     """
-    b = cfg["battery"]
-    cap = float(b["capacity_kwh"])
-    return {
-        "soc-at-start": f"{cap * float(b['soc_at_start_pct']) / 100.0} kWh",
-        "soc-min": f"{cap * float(b['soc_min_pct']) / 100.0} kWh",
-        "soc-max": f"{cap * float(b['soc_max_pct']) / 100.0} kWh",
-        "power-capacity": f"{float(b['power_capacity_kw'])} kW",
-        "charging-efficiency": f"{float(b['charging_efficiency_pct'])}%",
-        "discharging-efficiency": f"{float(b['discharging_efficiency_pct'])}%",
-    }
+    from flexmeasures.data.models.time_series import TimedBelief
+
+    out = {}
+    bdf = TimedBelief.search(
+        sensors=sensor,
+        event_starts_after=start,
+        event_ends_before=end,
+        beliefs_before=belief_time,
+        resolution=resolution,
+        one_deterministic_belief_per_event=True,
+    )
+    if len(bdf):
+        df = bdf.reset_index()
+        for _, row in df.iterrows():
+            val = row["event_value"]
+            if val == val:  # not NaN
+                out[_to_utc(row["event_start"])] = float(val) * scale
+    return out
 
 
-def resolve_inflexible_sensors(cfg, db, Sensor):
-    """Resolve the flex-context inflexible sensors and enforce the input allowlist.
+def get_or_create_source(db, DataSource, name, type_):
+    """Get (or create, uncommitted) a dedicated DataSource by (name, type) — never the mqtt-ingest one."""
+    src = db.session.query(DataSource).filter_by(name=name, type=type_).first()
+    if src is None:
+        src = DataSource(name=name, type=type_)
+        db.session.add(src)
+        db.session.flush()
+    return src
 
-    Any sensor bound to a forbidden source (deye/battery/soc, deye/bms/*) is rejected, and the set of
-    inflexible sensors must equal the configured expected ids (the Office grid sensor 7).
-    """
-    refs = cfg["flex_context"].get("inflexible-consumption", [])
-    expected = set(cfg.get("expected_inflexible_sensor_ids", []))
-    resolved, got_ids = [], set()
-    for ref in refs:
-        sid = ref["sensor"] if isinstance(ref, dict) else ref
-        sensor = db.session.get(Sensor, sid)
-        if sensor is None:
-            raise SystemExit(f"Inflexible sensor {sid} not found.")
-        topic = (sensor.attributes or {}).get("source_topic")
-        if is_forbidden(topic):
-            raise SystemExit(
-                f"Refusing forbidden inflexible source {topic!r} on sensor {sid}."
-            )
-        resolved.append((sensor, topic))
-        got_ids.add(sid)
-    if expected and got_ids != expected:
+
+def check_not_forbidden(sensor, role):
+    """Refuse a sensor bound to a forbidden source (deye/battery/soc, deye/bms/*)."""
+    topic = (sensor.attributes or {}).get("source_topic")
+    if sc9_core.is_forbidden(topic):
         raise SystemExit(
-            f"Inflexible sensors {sorted(got_ids)} do not match expected {sorted(expected)}."
+            f"Refusing forbidden {role} source {topic!r} on sensor {sensor.id}."
         )
-    return resolved
 
 
 def asset_flex_context_chain(sensor):
-    """Collect the DB-stored flex-context of the scheduled asset and its ancestors, for the log.
-
-    A non-empty entry that references sensors would silently pull extra inputs into the schedule, so
-    it is recorded for review.
-    """
+    """Collect the DB-stored flex-context of the scheduled asset and its ancestors, for the log."""
     chain, asset = [], sensor.generic_asset
     while asset is not None:
         chain.append(
@@ -140,90 +113,17 @@ def asset_flex_context_chain(sensor):
     return chain
 
 
-def snapshot_inputs(resolved, start, end, belief_time, resolution, expected_steps):
-    """Record the inflexible-load inputs, both raw and resampled to the schedule resolution.
-
-    Coverage is the fraction of PT15M slots that carry a real belief; the scheduler zero-fills the
-    rest, so a low coverage means the schedule is dominated by invented zeros.
-    """
-    from flexmeasures.data.models.time_series import TimedBelief
-
-    out, min_coverage = [], 1.0
-    for sensor, topic in resolved:
-        bdf = TimedBelief.search(
-            sensors=sensor,
-            event_starts_after=start,
-            event_ends_before=end,
-            beliefs_before=belief_time,
-        )
-        raw, covered = [], set()
-        if len(bdf):
-            df = bdf.reset_index()
-            for _, row in df.iterrows():
-                ev, val, src = row["event_start"], row["event_value"], row.get("source")
-                raw.append(
-                    {
-                        "event_start": ev.isoformat(),
-                        "belief_time": row["belief_time"].isoformat(),
-                        "source_id": getattr(src, "id", None),
-                        "value": None if val != val else float(val),
-                    }
-                )
-                slot = int((ev - start).total_seconds() // resolution.total_seconds())
-                if 0 <= slot < expected_steps:
-                    covered.add(slot)
-        resampled = []
-        try:
-            rbdf = TimedBelief.search(
-                sensors=sensor,
-                event_starts_after=start,
-                event_ends_before=end,
-                beliefs_before=belief_time,
-                resolution=resolution,
-                one_deterministic_belief_per_event=True,
-            )
-            if len(rbdf):
-                rdf = rbdf.reset_index()
-                for _, row in rdf.iterrows():
-                    val = row["event_value"]
-                    resampled.append(
-                        {
-                            "event_start": row["event_start"].isoformat(),
-                            "value": None if val != val else float(val),
-                            "source_id": getattr(row.get("source"), "id", None),
-                        }
-                    )
-        except (
-            Exception
-        ) as exc:  # resampling is best-effort logging, not the schedule itself
-            resampled = [{"error": f"{exc.__class__.__name__}: {exc}"}]
-        coverage = len(covered) / expected_steps if expected_steps else 0.0
-        min_coverage = min(min_coverage, coverage)
-        out.append(
-            {
-                "sensor_id": sensor.id,
-                "sensor_name": sensor.name,
-                "source_topic": topic,
-                "n_raw_beliefs": len(raw),
-                "raw_beliefs": raw,
-                "resampled_to_resolution": resampled,
-                "covered_slots": len(covered),
-                "expected_slots": expected_steps,
-                "coverage": coverage,
-                "note": "the scheduler zero-fills PT15M slots that carry no belief",
-            }
-        )
-    return out, min_coverage
+def coverage_over_window(sensor, start, end, belief_time, resolution, expected_steps):
+    """Fraction of window slots for which the sensor has a real belief (the scheduler zero-fills the rest)."""
+    slots = resample_by_slot(sensor, start, end, belief_time, resolution)
+    covered = sc9_core.covered_slots(list(slots), start, resolution, expected_steps)
+    return len(covered) / expected_steps if expected_steps else 0.0
 
 
 def compute_schedule_series(
     sensor, start, end, resolution, belief_time, flex_model, flex_context
 ):
-    """Compute the schedule in memory and return its pandas Series — saving nothing.
-
-    Uses the same scheduler instance FlexMeasures' make_schedule uses, but stops before any
-    save_to_db, so no belief is ever written.
-    """
+    """Compute the schedule in memory and return its pandas Series — saving nothing."""
     import pandas as pd
     from flexmeasures.data.models.planning.storage import StorageScheduler
     from flexmeasures.data.services.utils import get_scheduler_instance
@@ -243,11 +143,8 @@ def compute_schedule_series(
     )
     results = scheduler.compute()
     if isinstance(results, pd.Series):
-        # A scheduler may return a bare power Series for a single device.
         return results
     for result in results:
-        # The schedule is the result whose payload is a power Series tied to a sensor.
-        # Analysis payloads (soft-constraint results, commitment costs) are dicts, so they are skipped.
         if "sensor" in result and isinstance(result.get("data"), pd.Series):
             return result["data"]
     raise RuntimeError("Scheduler returned no schedule series.")
@@ -257,43 +154,16 @@ def series_to_records(series):
     if series is None or len(series) == 0:
         return []
     return [
-        {"event_start": ts.isoformat(), "value": (None if v != v else float(v))}
+        {
+            "event_start": _to_utc(ts).isoformat(),
+            "value": (None if v != v else float(v)),
+        }
         for ts, v in series.items()
     ]
 
 
-def _is_nan(value):
-    return value is None or (isinstance(value, float) and math.isnan(value))
-
-
-def check_reproducible(records1, records2, expected_steps):
-    """Enforce that a reproducibility proof is a real proof.
-
-    Returns (ok, reason).
-    An empty, all-NaN, or wrong-length schedule is rejected, so two all-NaN runs never pass as equal.
-    """
-    if len(records1) != expected_steps:
-        return False, f"schedule has {len(records1)} steps, expected {expected_steps}"
-    if len(records1) != len(records2):
-        return False, "the two runs produced different lengths"
-    if all(_is_nan(r["value"]) for r in records1):
-        return False, "schedule is entirely NaN — not a proof"
-    for a, b in zip(records1, records2):
-        if a["event_start"] != b["event_start"]:
-            return False, "event timestamps differ between runs"
-        av, bv = a["value"], b["value"]
-        if _is_nan(av) and _is_nan(bv):
-            continue
-        if _is_nan(av) != _is_nan(bv) or av != bv:
-            return False, f"values differ at {a['event_start']}: {av} vs {bv}"
-    return True, "identical"
-
-
 def validate_commit_target(sensor, cfg, resolution, coverage, min_coverage):
-    """Refuse --commit unless the target is exactly the approved, marked PT15M output sensor.
-
-    This makes it impossible for --commit to write a measured sensor (e.g. sensor 17).
-    """
+    """Refuse --commit unless the target is exactly the approved, marked PT15M output sensor."""
     tid = cfg.get("target_output_sensor_id")
     attrs = sensor.attributes or {}
     problems = []
@@ -327,14 +197,13 @@ def validate_commit_target(sensor, cfg, resolution, coverage, min_coverage):
 
 def main():  # noqa: C901
     parser = argparse.ArgumentParser(
-        description="labems-sc9 shadow storage scheduler (compute-only by default)."
+        description="labems-sc9 shadow storage scheduler (retrospective derived-load peak-shaving)."
     )
     parser.add_argument(
         "--config", required=True, help="Path to shadow-g2-config.json."
     )
     parser.add_argument(
-        "--start",
-        help="ISO start of the schedule window (default: the resolution boundary at or before now, UTC).",
+        "--start", help="ISO start override for the window (default: derived)."
     )
     parser.add_argument(
         "--belief-time",
@@ -348,17 +217,14 @@ def main():  # noqa: C901
     parser.add_argument(
         "--commit",
         action="store_true",
-        help="Persist the schedule to the approved output sensor (writes the FM DB). Off by default.",
+        help="Persist the derived load and the schedule (writes the FM DB). Off by default.",
     )
     parser.add_argument(
         "--prove-reproducible",
         action="store_true",
-        help="Compute twice on the pinned inputs and ENFORCE identical, non-empty output.",
+        help="Compute twice on the same window and ENFORCE identical, non-empty output.",
     )
-    parser.add_argument(
-        "--code-sha",
-        help="Record the repo commit the code came from (the container has no git).",
-    )
+    parser.add_argument("--code-sha", help="Record the repo commit the code came from.")
     parser.add_argument(
         "--log", default="/tmp/shadow-g2-log.jsonl", help="Append-only run log path."
     )
@@ -375,28 +241,87 @@ def main():  # noqa: C901
     config_version = cfg.get("version", "unversioned")
     config_sha256 = hashlib.sha256(config_text.encode()).hexdigest()
 
-    resolution = _iso_duration_to_timedelta(cfg["resolution"])
+    resolution = sc9_core.iso_duration_to_timedelta(cfg["resolution"])
     horizon = timedelta(hours=float(cfg["horizon_hours"]))
-    expected_steps = int(horizon.total_seconds() // resolution.total_seconds())
     min_coverage = float(cfg.get("min_input_coverage", 0.9))
+    window_mode = cfg.get("window_mode", "retrospective")
 
     app = create_app()
     with app.app_context():
         import flexmeasures
         from flexmeasures.data import db
-        from flexmeasures.data.models.time_series import Sensor
+        from flexmeasures.data.models.data_sources import DataSource
+        from flexmeasures.data.models.time_series import Sensor, TimedBelief
         from flexmeasures.data.models.planning.storage import StorageScheduler
 
         now = datetime.now(tz=timezone.utc)
-        belief_time = (
-            _isoparse(args.belief_time, "--belief-time") if args.belief_time else now
-        )
-        start = (
-            _isoparse(args.start, "--start")
-            if args.start
-            else _floor_to(now, resolution)
-        )
-        end = start + horizon
+        try:
+            belief_time = (
+                sc9_core.isoparse(args.belief_time, "--belief-time")
+                if args.belief_time
+                else now
+            )
+            start_override = (
+                sc9_core.isoparse(args.start, "--start") if args.start else None
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc))
+
+        site_load_id = cfg.get("site_load_sensor_id")
+        if site_load_id is None:
+            raise SystemExit(
+                "site_load_sensor_id is null: run seed-site-load-sensor.py (approved), then set it in the config."
+            )
+        site_load_sensor = db.session.get(Sensor, site_load_id)
+        grid_sensor = db.session.get(Sensor, GRID_SENSOR_ID)
+        batt_sensor = db.session.get(Sensor, BATT_SENSOR_ID)
+        if site_load_sensor is None or grid_sensor is None or batt_sensor is None:
+            raise SystemExit("site-load, grid, or battery sensor not found.")
+        # Deny-list allowlist: neither the inflexible input nor the derivation inputs may be forbidden.
+        check_not_forbidden(site_load_sensor, "inflexible")
+        check_not_forbidden(grid_sensor, "grid")
+        check_not_forbidden(batt_sensor, "battery")
+        if (site_load_sensor.attributes or {}).get("source_topic") is not None:
+            raise SystemExit(
+                "site-load sensor unexpectedly carries a source_topic; refusing."
+            )
+        # Pin the sensor identities and units, so a mis-set config cannot write onto the wrong sensor
+        # or feed the W->kW scale a non-W input.
+        if (
+            site_load_sensor.generic_asset_id != OFFICE_ASSET_ID
+            or (site_load_sensor.attributes or {}).get("labems") != "sc9-site-load"
+        ):
+            raise SystemExit(
+                "site-load sensor is not the approved Office sc9-site-load sensor; refusing."
+            )
+        if site_load_sensor.event_resolution != resolution:
+            raise SystemExit(
+                f"site-load sensor resolution {site_load_sensor.event_resolution} != {resolution}."
+            )
+        if site_load_sensor.unit != "kW":
+            raise SystemExit(
+                f"site-load sensor unit {site_load_sensor.unit!r} != 'kW'."
+            )
+        if grid_sensor.unit != "W" or batt_sensor.unit != "W":
+            raise SystemExit(
+                f"grid/battery unit not W (got {grid_sensor.unit!r}/{batt_sensor.unit!r}); the W->kW scale would be wrong."
+            )
+
+        end = sc9_core.floor_to(now, resolution)
+        earliest = None
+        if window_mode == "retrospective" and start_override is None:
+            grid_lookback = resample_by_slot(
+                grid_sensor, end - horizon, end, belief_time, resolution
+            )
+            earliest = sc9_core.continuous_run_start(
+                list(grid_lookback), end, resolution
+            )
+        try:
+            start, end, expected_steps = sc9_core.compute_window(
+                window_mode, now, resolution, horizon, earliest, start_override
+            )
+        except ValueError as exc:
+            raise SystemExit(f"cannot form schedule window: {exc}")
 
         target_id = (
             args.target_sensor
@@ -404,32 +329,66 @@ def main():  # noqa: C901
             or cfg.get("scheduling_sensor_id_for_validation")
         )
         if target_id is None:
-            raise SystemExit(
-                "No target sensor: set target_output_sensor_id (once the output sensor exists) or pass --target-sensor."
-            )
-        sensor = db.session.get(Sensor, target_id)
-        if sensor is None:
+            raise SystemExit("No target sensor configured.")
+        target_sensor = db.session.get(Sensor, target_id)
+        if target_sensor is None:
             raise SystemExit(f"Target sensor {target_id} not found.")
 
-        flex_model = build_flex_model(cfg)
-        flex_context = cfg["flex_context"]
-
-        resolved = resolve_inflexible_sensors(cfg, db, Sensor)
-        inputs, coverage = snapshot_inputs(
-            resolved, start, end, belief_time, resolution, expected_steps
+        # Derive the real site load (kW) from grid (import +) and battery (discharge +), both in W.
+        grid_by_slot = resample_by_slot(
+            grid_sensor, start, end, belief_time, resolution, scale=0.001
         )
-        inherited_flex_context = asset_flex_context_chain(sensor)
+        batt_by_slot = resample_by_slot(
+            batt_sensor, start, end, belief_time, resolution, scale=0.001
+        )
+        p_load = sc9_core.derive_site_load(grid_by_slot, batt_by_slot)
+
+        # Write the derived load onto the site-load sensor within the session, so the scheduler reads it;
+        # flush makes it visible in-session. It is committed only under --commit, else rolled back.
+        derived_source = get_or_create_source(
+            db, DataSource, DERIVED_SOURCE_NAME, "derived"
+        )
+        db.session.add_all(
+            [
+                TimedBelief(
+                    sensor=site_load_sensor,
+                    source=derived_source,
+                    event_start=slot,
+                    belief_time=belief_time,
+                    event_value=value,
+                )
+                for slot, value in p_load.items()
+            ]
+        )
+        db.session.flush()
+
+        flex_model = sc9_core.build_flex_model(cfg)
+        flex_context = dict(cfg["flex_context"])
+        flex_context["inflexible-consumption"] = [{"sensor": site_load_id}]
+
+        coverage = coverage_over_window(
+            site_load_sensor, start, end, belief_time, resolution, expected_steps
+        )
+        inherited_flex_context = asset_flex_context_chain(target_sensor)
 
         series = compute_schedule_series(
-            sensor, start, end, resolution, belief_time, flex_model, flex_context
+            target_sensor, start, end, resolution, belief_time, flex_model, flex_context
         )
         records = series_to_records(series)
+
+        # The scheduler output is consumption-positive (charging +); the value metric needs discharge-positive.
+        batt_sched_discharge = {
+            _to_utc(datetime.fromisoformat(r["event_start"])): -r["value"]
+            for r in records
+            if r["value"] is not None
+        }
+        metric = sc9_core.peak_metrics(grid_by_slot, p_load, batt_sched_discharge)
 
         reproducible_ok, reproducible_reason = None, None
         if args.prove_reproducible:
             records2 = series_to_records(
                 compute_schedule_series(
-                    sensor,
+                    target_sensor,
                     start,
                     end,
                     resolution,
@@ -438,44 +397,60 @@ def main():  # noqa: C901
                     flex_context,
                 )
             )
-            reproducible_ok, reproducible_reason = check_reproducible(
+            reproducible_ok, reproducible_reason = sc9_core.check_reproducible(
                 records, records2, expected_steps
             )
 
         insufficient_input = coverage < min_coverage
 
-        # Commit path: strictly validated, outcome recorded honestly.
         commit_attempted = commit_succeeded = False
         commit_error = None
-        if args.commit:
-            validate_commit_target(sensor, cfg, resolution, coverage, min_coverage)
-            from flexmeasures.data.services.scheduling import make_schedule
-            from flexmeasures.data.services.utils import get_asset_or_sensor_ref
-
+        if args.commit and args.prove_reproducible and not reproducible_ok:
+            commit_error = f"reproducibility proof failed ({reproducible_reason}); refusing to commit"
+        elif args.commit:
+            validate_commit_target(
+                target_sensor, cfg, resolution, coverage, min_coverage
+            )
             commit_attempted = True
             try:
-                make_schedule(
-                    asset_or_sensor=get_asset_or_sensor_ref(sensor),
-                    start=start,
-                    end=end,
-                    resolution=resolution,
-                    belief_time=belief_time,
-                    flex_model=flex_model,
-                    flex_context=flex_context,
-                    scheduler_specs={
-                        "module": "flexmeasures.data.models.planning.storage",
-                        "class": "StorageScheduler",
-                    },
-                    dry_run=False,
+                # Persist the derived load AND the schedule in ONE transaction, so a failure leaves
+                # neither behind (atomic).
+                # The schedule is stored from the already-computed series (consumption-positive, in the
+                # output sensor's unit); the output sensor is consumption_is_positive, so the value is
+                # stored as-is.
+                # This deliberately avoids make_schedule's separate commit (which would break atomicity
+                # with the derived-load write) and its persist_flex_model side effect (writing BatteryBank
+                # SOC state) — see shadow-g2.md.
+                sched_source = get_or_create_source(
+                    db, DataSource, SCHEDULE_SOURCE_NAME, "scheduler"
                 )
+                db.session.add_all(
+                    [
+                        TimedBelief(
+                            sensor=target_sensor,
+                            source=sched_source,
+                            event_start=_to_utc(ts),
+                            belief_time=belief_time,
+                            event_value=value,
+                        )
+                        for ts, value in series.items()
+                        if value == value  # skip NaN
+                    ]
+                )
+                db.session.commit()  # derived load (flushed) + schedule, atomically
                 commit_succeeded = True
             except Exception as exc:
+                db.session.rollback()
                 commit_error = f"{exc.__class__.__name__}: {exc}"
+
+        if not commit_succeeded:
+            db.session.rollback()  # discard the flushed derived load — nothing persists
 
         run = {
             "run_utc": now.isoformat(),
             "bead": "labems-sc9",
             "objective": cfg.get("objective"),
+            "window_mode": window_mode,
             "config_version": config_version,
             "config_sha256": config_sha256,
             "window": {
@@ -485,19 +460,22 @@ def main():  # noqa: C901
                 "steps": expected_steps,
             },
             "belief_time": belief_time.isoformat(),
+            "site_load_sensor_id": site_load_id,
             "target_sensor_id": target_id,
             "flex_model": flex_model,
             "flex_context": flex_context,
             "inherited_asset_flex_context": inherited_flex_context,
-            "inputs": inputs,
             "input_coverage": coverage,
             "min_input_coverage": min_coverage,
             "insufficient_input": insufficient_input,
+            "n_load_slots": len(p_load),
+            "peak_shaving": metric,
             "schedule": records,
             "solver_declared": cfg.get("solver"),
             "solver_actual": app.config.get("FLEXMEASURES_LP_SOLVER"),
             "code_version": f"{flexmeasures.__version__}; StorageScheduler v{StorageScheduler.__version__}",
             "code_sha": args.code_sha,
+            "perfect_hindsight_upper_bound": True,
             "broker_publishes": 0,
             "hardware_commands": 0,
             "commit_attempted": commit_attempted,
@@ -509,20 +487,17 @@ def main():  # noqa: C901
             run["reproducible"] = reproducible_ok
             run["reproducible_reason"] = reproducible_reason
 
-        # On the compute-only path, discard any pending (uncommitted) session state as a safety net.
-        if not commit_succeeded:
-            db.session.rollback()
-
         with open(args.log, "a") as logf:
             logf.write(json.dumps(run) + "\n")
 
-        nonzero = [r for r in records if not _is_nan(r["value"]) and r["value"] != 0.0]
         print(
             f"run_utc={now.isoformat()} config={config_version} sha256={config_sha256[:12]} "
-            f"target_sensor={target_id} window={start.isoformat()}..{end.isoformat()} "
-            f"belief_time={belief_time.isoformat()} schedule_steps={len(records)} "
+            f"mode={window_mode} target_sensor={target_id} site_load_sensor={site_load_id} "
+            f"window={start.isoformat()}..{end.isoformat()} steps={expected_steps} "
+            f"belief_time={belief_time.isoformat()} load_slots={len(p_load)} "
             f"coverage={coverage:.3f} insufficient_input={insufficient_input} "
-            f"solver={app.config.get('FLEXMEASURES_LP_SOLVER')} "
+            f"peak_before={metric['peak_kw_before']} peak_after={metric['peak_kw_after']} "
+            f"kw_shaved={metric['kw_shaved']} pct_shaved={metric['pct_shaved']} "
             f"commit_attempted={commit_attempted} committed={commit_succeeded} "
             f"broker_publishes=0 hardware_commands=0"
         )
@@ -530,9 +505,6 @@ def main():  # noqa: C901
             print(f"commit_error={commit_error}")
         if args.prove_reproducible:
             print(f"reproducible={reproducible_ok} ({reproducible_reason})")
-        print(f"nonzero_schedule_steps={len(nonzero)} of {len(records)}")
-        for r in records[:6]:
-            print(f"  {r['event_start']}  {r['value']}")
 
         if args.prove_reproducible and not reproducible_ok:
             sys.exit(1)

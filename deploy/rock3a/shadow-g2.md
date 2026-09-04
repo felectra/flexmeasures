@@ -1,126 +1,162 @@
 # labems-sc9 — shadow storage scheduler (rubіж G2)
 
-Compute-only shadow scheduling for the ROCK 3A pilot.
-FlexMeasures' `StorageScheduler` computes a battery schedule for `BatteryBank` on the live
-labems-3oh sensors, the run is journaled reproducibly, and **nothing is executed**: no broker
-publish, no command to the bridge/inverter/BMS, no hardware change.
+Compute-only, **retrospective** shadow scheduling for the ROCK 3A pilot.
+FlexMeasures' `StorageScheduler` computes a battery schedule that shaves the peak of the **derived real
+site load** over an observed past window, quantifies the peak reduction, journals the run
+reproducibly, and **nothing is executed**: no broker publish, no command to the bridge/inverter/BMS,
+no hardware change.
 This is the G2 rung of `lab-ems-program.md` §6 ("EMS обчислює рішення, але не виконує їх").
 
 ## Files
 
 | File | Role |
 |---|---|
-| `shadow_schedule.py` | The wrapper: enforces the input allowlist, snapshots inputs, records `belief_time`, computes the schedule, journals the run. Compute-only unless `--commit`. |
-| `shadow-g2-config.json` | Versioned objective + constraints (capacity, SOC, efficiency, peak nudge, resolution, horizon, coverage gate). |
-| `seed-shadow-sensor.py` | Idempotent seed for the PT15M output sensor on `BatteryBank`. **Not run yet** (gated on YellowHeron; needs `--i-have-approval`). |
+| `sc9_core.py` | Pure, stdlib-only logic (window math, continuous-run rule, P_load derivation, peak metric, reproducibility). Unit-tested. |
+| `shadow_schedule.py` | The FM shell: derives the load, writes it, schedules, quantifies, journals. Compute-only unless `--commit`. |
+| `shadow-g2-config.json` | Versioned objective + constraints + sign convention. |
+| `seed-shadow-sensor.py` | Idempotent seed for the PT15M schedule **output** sensor on `BatteryBank` (id 45). Needs `--i-have-approval`. |
+| `seed-site-load-sensor.py` | Idempotent seed for the derived **site-load** sensor on `Office` (id 5). Needs `--i-have-approval`. |
+| `test_sc9_core.py` | Self-contained regression tests (`pytest deploy/rock3a/test_sc9_core.py`). |
 
-## Objective
+## Why a derived load — the circularity finding (methodological evidence)
 
-Shadow peak-shaving of grid import (`deye/ac/total_grid_power`, Office), expressed in this
-FlexMeasures version as a priced `site-peak-consumption` commitment plus the Office grid sensor as
-the site inflexible load.
-The priority is **reproducibility, not optimality** (per the directive).
+Peak-shaving directly against the behind-meter `deye/ac/total_grid_power` is **circular**: that signal
+is the *net* grid exchange, which already nets whatever the battery does, so asking the scheduler to
+shave it against itself yields **coverage ~0.01 and a near-trivial (essentially zero) schedule** — the
+objective would be theater.
+The honest inflexible load is the site's own consumption, independent of the battery's dispatch.
+
+## Derived load and sign convention
+
+- `deye/ac/total_grid_power` (sensor 7): **positive = import** from the grid.
+- `deye/battery/power` (sensor 17): **positive = discharge**, negative = charge (verified: labems-3oh
+  read −78 W while charging).
+- PV is ~0 at this bench.
+- **Energy balance:** `P_load = P_grid + P_batt` — e.g. import 540 + battery −78 (charging) = 462 W
+  real load.
+
+Both inputs are allowed `deye/*` sources (only `deye/battery/soc` and `deye/bms/*` are forbidden).
+Only slots where **both** grid and battery have a value are derived (the intersection), so a battery
+dropout lowers coverage instead of silently assuming a zero battery contribution.
+The derived `P_load` is written to a dedicated **site-load sensor** on `Office` (kW, PT15M, marker
+`sc9-site-load`, no `source_topic`), from a dedicated `sc9-derived` DataSource (never `mqtt-ingest`),
+because FlexMeasures reads the scheduler's `inflexible-consumption` from a sensor.
+The tool pins these identities and units at runtime (site-load on Office 5, `sc9-site-load`, kW, PT15M;
+grid and battery in W), so a mis-set config cannot write onto the wrong sensor or misread the scale.
+
+## Retrospective (backcast) window
+
+There is no future load forecast (the net grid can't self-forecast), so the schedule is computed over
+the **observed past**:
+
+- `end = floor(now, resolution)`.
+- `start` = the start of the **continuous t2t run** within the horizon — the earliest slot of the most
+  recent unbroken run of grid data (gaps ≤ 2 resolutions), capped at `end − horizon`. This excludes
+  the sparse pre-t2t labems-3oh samples, so the window is real, continuous data.
+- The window **grows** from short (a few hours now) to the full 24 h as t2t accumulates telemetry.
+- `expected_steps` is derived from the **actual** window `(end − start) / resolution`, so coverage is
+  correct for a growing backcast (a fully-covered window → coverage ~1.0, the gate passes).
+
+**Perfect-hindsight caveat (honest):** the shadow knows the whole window's load in advance, so the
+reported peak reduction is a **potential upper bound**, not what a real-time EMS without a forecast
+could guarantee.
+
+## Value metric — the point
+
+Over the window (all in kW):
+
+- `peak_kw_before` = max observed grid import = `max(grid[t])`.
+- shadow grid under the scheduled dispatch = `P_load[t] − batt_scheduled_discharge[t]` (discharging
+  lowers import; the scheduler's output is consumption-positive, so discharge = −output).
+- `peak_kw_after` = max shadow grid.
+- `kw_shaved = peak_kw_before − peak_kw_after`; `pct_shaved = 100 · kw_shaved / peak_kw_before`.
+
+These land in the per-run JSONL log (`peak_shaving`) and the stdout summary.
 
 ## Declared parameters — NOT measurements
 
-Everything below is an explicit assumption, versioned in `shadow-g2-config.json` and echoed into
-every log record:
+Versioned in `shadow-g2-config.json`, echoed into every log record:
 
-- **Bank capacity `18.0 kWh`** (nameplate/calc; `19.7 kWh` kept as a sensitivity value; SOH unknown).
-- **SOC-at-start `50 %`** — there is no trustworthy live SOC: `deye/battery/soc` is forbidden (reads
-  full at ~1/3 charge) and the two strings diverge (53 % vs 24 %).
-- **SOC band `10–100 %`** — a modelling choice; the hard voltage window `44–57 V` is never widened
-  (GM 21V-650 fire-recall pattern).
-- **Efficiency `95 % / 95 %`** charging/discharging — a declared round-trip efficiency, not a
-  measurement.
-- **Prices** — flat `50 EUR/MWh` consumption = production is an internal nudge, not a tariff; the peak
-  baseline (`0.3 kW`) and price (`120 EUR/MW`) are an internal peak-shaving nudge, not a contracted
-  limit.
-- **Grid signal caveat** — `deye/ac/total_grid_power` already nets the battery (behind-the-meter), so
-  wiring it as the inflexible load makes this a shadow illustration, not a true dispatch.
+- **Bank capacity `18.0 kWh`** (nameplate/calc; `19.7 kWh` sensitivity; SOH unknown).
+- **SOC-at-start `50 %`** — no trustworthy live SOC (`deye/battery/soc` forbidden; strings diverge).
+- **SOC band `10–100 %`** — a modelling choice; the hard voltage window `44–57 V` is never widened.
+- **Efficiency `95 % / 95 %`** — a declared round-trip efficiency, not a measurement.
+- **Prices / peak nudge** — flat `50 EUR/MWh` and the `site-peak-consumption` baseline/price are
+  internal nudges, not a tariff or a contracted limit.
 
 ## Safety design
 
-- **Compute-only by default.** No MQTT client is ever instantiated; template-asset provisioning is
-  disabled at startup, and the non-commit path rolls back the session, so it writes nothing.
-- **The input allowlist is enforced.** Any inflexible sensor bound to `deye/battery/soc` or
-  `deye/bms/*` is rejected, and the inflexible set must equal the configured expected ids (grid
-  sensor 7).
-- **`--commit` is strictly gated.** It refuses unless the target is exactly
-  `target_output_sensor_id`, on `BatteryBank` (asset 6), at `PT15M`, carrying the
-  `labems=sc9-shadow-schedule` marker, with no `source_topic`, and only when input coverage clears
-  the threshold. `--commit` cannot be combined with `--target-sensor`, so it can never write a
-  measured sensor (e.g. sensor 17).
-- **Honest outcome.** The log records `commit_attempted` vs `commit_succeeded`; `committed` is true
-  only if the write actually succeeded.
+- **Compute-only by default.** No MQTT client; startup provisioning disabled; on the non-commit path
+  the session (including the flushed derived load) is rolled back, so it writes nothing.
+- **Derived load is flush-then-decide.** `P_load` is written to the session and flushed so the
+  scheduler reads it in-session; it is **committed only under `--commit`**, otherwise rolled back.
+- **Deny-list enforced.** The inflexible sensor (site-load) and both derivation inputs (grid, battery)
+  are refused if bound to `deye/battery/soc` or `deye/bms/*`.
+- **`--commit` strictly gated.** Refuses unless the target is exactly `target_output_sensor_id` (45),
+  on `BatteryBank` (asset 6), at `PT15M`, with the `sc9-shadow-schedule` marker, no `source_topic`,
+  and coverage ≥ `min_input_coverage`. `--commit` cannot be combined with `--target-sensor`, so it can
+  never write a measured sensor. A failed `--prove-reproducible` also blocks the commit.
+- **Atomic write.** Under `--commit` the derived load and the schedule are persisted in **one
+  transaction** (the derived load is flushed, then both are committed together), so a failure leaves
+  neither behind. The schedule is stored from the already-computed series (consumption-positive, in
+  the output sensor's unit), which deliberately avoids `make_schedule`'s separate commit (that would
+  break atomicity with the derived-load write) and its `persist_flex_model` side effect (writing
+  BatteryBank's SOC state).
+- **Honest outcome.** `commit_attempted` vs `commit_succeeded`; `committed` is true only on a real write.
 
 ## How to run
 
-Copy the wrapper and config into the server container, then run (read-only broker; writes the FM DB
-only with `--commit`):
+Seed the two sensors once (owner-authorized), set their ids in the config, then run:
 
 ```bash
+# One-time, owner-authorized (writes the FM DB):
+podman exec -i rock3a_server_1 python - --i-have-approval < deploy/rock3a/seed-site-load-sensor.py
+podman exec -i rock3a_server_1 python - --i-have-approval < deploy/rock3a/seed-shadow-sensor.py
+# then set site_load_sensor_id (and confirm target_output_sensor_id=45) in shadow-g2-config.json.
+
+# Compute-only (writes nothing):
+podman cp deploy/rock3a/sc9_core.py rock3a_server_1:/tmp/sc9_core.py
 podman cp deploy/rock3a/shadow_schedule.py rock3a_server_1:/tmp/shadow_schedule.py
 podman cp deploy/rock3a/shadow-g2-config.json rock3a_server_1:/tmp/shadow-g2-config.json
 podman exec -i rock3a_server_1 python /tmp/shadow_schedule.py \
-    --config /tmp/shadow-g2-config.json \
-    --start 2026-09-01T19:00:00+00:00 --belief-time 2026-09-02T08:00:00+00:00 \
-    --prove-reproducible --code-sha <repo SHA>
+    --config /tmp/shadow-g2-config.json --prove-reproducible --code-sha <repo SHA>
+
+# Committing cycle (persists the derived load + the schedule):
+podman exec -i rock3a_server_1 python /tmp/shadow_schedule.py \
+    --config /tmp/shadow-g2-config.json --commit --prove-reproducible --code-sha <repo SHA>
 ```
 
-- `--start` and `--belief-time` must be timezone-aware; a naive value is rejected.
-- `--prove-reproducible` computes twice on the pinned inputs and **exits non-zero** unless the two
-  schedules are identical and a real proof (non-empty, not all-NaN, exactly 96 PT15M steps for 24 h).
-- `--commit` is off by default and additionally refused until `target_output_sensor_id` is set and
-  the target passes every gate above.
-- Schedule values are in the target sensor's unit; the log records them verbatim.
+- `--start`/`--belief-time` must be timezone-aware; a naive value is rejected.
+- `--prove-reproducible` computes twice on the same window and **exits non-zero** unless the two
+  schedules are identical and a real proof (non-empty, not all-NaN, exactly the **actual** window steps).
 
 ## Reproducibility method
 
-`belief_time` is **recorded** on every run (default: now; pin it with `--belief-time`).
-FlexMeasures reads only beliefs known as of `belief_time`, so re-running with the **same** recorded
-`belief_time` reads exactly the same inputs, and the deterministic HiGHS solver then returns an
-identical schedule.
-The log stores the config `sha256`, the window, the `belief_time`, the raw and resampled inputs (with
-each input's event time, belief time, and source id), the solver actually used, the code version and
-`--code-sha`, and an explicit `broker_publishes=0 hardware_commands=0` line — one JSON record per run.
+`belief_time` is recorded on every run (default now; pin with `--belief-time`).
+FlexMeasures reads only beliefs known as of `belief_time`, and the window is captured once, so the two
+computes read the same inputs and the deterministic HiGHS solver returns an identical schedule.
 
-## Completeness gate — the honest guard for one-shot ingestion
+## Coverage gate
 
-`input_coverage` is the fraction of PT15M slots that carry a real belief; the scheduler zero-fills
-the rest, so a low coverage means the schedule is dominated by invented zeros.
-When coverage is below `min_input_coverage` (0.9) the run is marked `insufficient_input` and
-`--commit` is refused — a schedule built mostly on zeros is never silently presented as real.
-
-A meaningful **≥24 h** shadow cycle therefore needs the inflexible sensor to be **continuously**
-populated.
-The labems-3oh bridge (`mqtt_ingest.py`) is a **one-shot** capture, so the DB currently holds only a
-few grid-power beliefs and coverage is far below the gate.
-Standing up a continuous ingestion path is a separate step and a **host-service change**, deferred
-while the Plan D observation window is open (until `2026-09-03T07:29:47Z`).
+`input_coverage` is the fraction of window slots for which the site-load sensor has a real belief.
+Below `min_input_coverage` (0.9) the run is `insufficient_input` and `--commit` is refused.
+With continuous t2t ingestion the retrospective window is fully covered (~1.0), so the gate passes;
+it still guards against a future gap.
 
 ## Open items for YellowHeron / owner
 
-- **Output-sensor boundary** — confirm a scheduling output sensor on the existing `BatteryBank` is
-  within "no new assets" (asked in the acceptance thread).
-- **Continuous ingestion** — a real ≥24 h run needs it; it is a host-service change, currently
-  blocked by the Plan D freeze.
-- **`persist_flex_model` side effect** — on a non-dry-run, `make_schedule` calls
-  `persist_flex_model`, which updates `BatteryBank`'s stored `soc_datetime` / `soc_in_mwh`
-  (storage.py). That means a committed shadow run writes the asset's SOC state, not only the schedule
-  beliefs. Confirm whether writing asset SOC state is acceptable for a shadow run, or whether the
-  commit path should be adjusted to avoid it.
+- **Sensor boundary** — both new sensors live on existing assets (site-load on Office 5, schedule
+  output on BatteryBank 6), within the "no new assets" precedent; flagged for confirmation.
+- **Asset SOC state** — the commit path deliberately self-persists the schedule instead of calling
+  `make_schedule`, so it does **not** run `persist_flex_model` and never writes BatteryBank's SOC
+  state; a committed run touches only the derived-load and schedule beliefs on their dedicated sensors.
+  This deviates from the "use make_schedule" wording in the spec, for atomicity — flagged for confirmation.
 
-## Validation performed (read-only, dry-run)
+## Validation
 
-On the running image (`0.1.dev1983+g9aa86e789`, FlexMeasures v1.0.0):
-
-- The scheduler loads and the config deserializes.
-- A 24 h PT15M schedule (96 steps) computes cleanly end-to-end.
-- **Reproducible**: two computes on the same pinned inputs return an identical schedule (the
-  enforcing check passes).
-- **Responds to the objective**: `site-peak-consumption` `0.3 kW` → the 96 steps charge into the free
-  headroom; `0 kW` → the battery idles. The objective is wired correctly.
-- **No incidental writes**: `generic_asset` / `sensor` / `timed_belief` row counts are unchanged
-  across a compute-only run.
-- Zero writes (`committed=False`), zero broker publishes, zero commands.
+`pytest deploy/rock3a/test_sc9_core.py` covers the window math (retrospective cap to earliest and to
+horizon, actual `expected_steps`), the continuous-run rule (excludes sparse old samples), the P_load
+sign/derivation, the peak metric (before/after/shaved), and the reproducibility check over the actual
+window; fail-first was verified for each.
+The FlexMeasures integration (the flush/commit path, the scheduler output sign, `make_schedule`) is
+validated by the owner's live run, since the running service must not be disturbed to build this.
